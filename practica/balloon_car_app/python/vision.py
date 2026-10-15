@@ -20,7 +20,7 @@ def check_labels(labels, origin):
         raise RuntimeError(
             f"{origin}: el modelo cargado tiene etiquetas {sorted(found)[:10]}, se esperaban "
             f"{sorted(EXPECTED_LABELS)}. No es el Impulse #1 de hackaton_arduinoq3: revisa "
-            "EI_OBJ_DETECTION_MODEL en app.yaml y que el .eim esté en esa ruta de la placa.")
+            "el modelo elegido en App Lab (Brick Configuration → AI models).")
 
 
 class BrickDetector:

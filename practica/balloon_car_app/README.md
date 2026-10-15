@@ -3,21 +3,11 @@
 Cámara → YOLO-Pro de Edge Impulse servido por el **brick Object Detection** (clases `azul` / `rojo` / `verde`) → `BalloonController` (PID sobre `dx`) → `drive(v, w)` vía Bridge → 2 motores DC.
 
 ## Modelo (brick Object Detection) — Impulse #1 de `hackaton_arduinoq3`
-El modelo está **fijado en `app.yaml`** con `EI_OBJ_DETECTION_MODEL`, que tiene prioridad sobre el modelo elegido en la UI de App Lab. Solo hay que copiar el `.eim` (build **Linux AARCH64** del Impulse #1) a la placa una vez:
-
-```bash
-# Desde la laptop, con el UNO Q por USB (adb) o por red (scp)
-adb push 'hackaton_arduinoq3-linux-aarch64-v2-impulse-#1.eim' /home/arduino/.arduino-bricks/ei-models/hackaton_arduinoq3-impulse-1.eim
-adb shell chmod +x /home/arduino/.arduino-bricks/ei-models/hackaton_arduinoq3-impulse-1.eim
-# o
-scp 'hackaton_arduinoq3-linux-aarch64-v2-impulse-#1.eim' arduino@<ip>:/home/arduino/.arduino-bricks/ei-models/hackaton_arduinoq3-impulse-1.eim
-ssh arduino@<ip> chmod +x /home/arduino/.arduino-bricks/ei-models/hackaton_arduinoq3-impulse-1.eim
-```
-(Si la carpeta no existe: `mkdir -p /home/arduino/.arduino-bricks/ei-models`.)
+El modelo **se carga desde Edge Impulse con el brick** en App Lab: *Brick Configuration → AI models* → proyecto `hackaton_arduinoq3`, Impulse #1. No hay que copiar ningún `.eim` a la placa y `app.yaml` no fija ninguna ruta.
 
 Al arrancar, la consola debe mostrar `etiquetas=['azul', 'rojo', 'verde']`. Si el brick cargó otro modelo (p. ej. el YOLOX de COCO por defecto), la app **se detiene** con un error que lo dice.
 
-Si reentrenas, vuelve a descargar el build AARCH64 y sobrescribe el mismo archivo.
+Si reentrenas, vuelve a seleccionar el modelo en el brick para que App Lab descargue la versión nueva.
 
 No hace falta `edge_impulse_linux` en el UNO Q. A cada frame se le hace resize al tamaño de entrada del modelo y se manda como JPEG al brick, así las cajas vuelven en coordenadas del modelo y `get_detections` las pasa al frame.
 
