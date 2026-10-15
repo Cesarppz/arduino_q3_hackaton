@@ -1,0 +1,3 @@
+name: FOMO Tracker
+description: "Detecta un objeto con FOMO (Edge Impulse) y gira un stepper para centrarlo."
+icon: 🎯
