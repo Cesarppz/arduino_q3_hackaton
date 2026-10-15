@@ -17,14 +17,19 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-# edge_impulse_linux importa su módulo de audio (pyaudio) al cargarse.
-# No usamos audio: si pyaudio no está instalado ponemos un módulo vacío.
-try:
-    import pyaudio  # noqa: F401
-except ImportError:
-    sys.modules["pyaudio"] = types.ModuleType("pyaudio")
 
-from edge_impulse_linux.image import ImageImpulseRunner
+def _import_runner():
+    """Importa el SDK solo cuando se usa un .eim local (en el UNO Q se usa el brick).
+
+    edge_impulse_linux importa su módulo de audio (pyaudio) al cargarse.
+    No usamos audio: si pyaudio no está instalado ponemos un módulo vacío.
+    """
+    try:
+        import pyaudio  # noqa: F401
+    except ImportError:
+        sys.modules["pyaudio"] = types.ModuleType("pyaudio")
+    from edge_impulse_linux.image import ImageImpulseRunner
+    return ImageImpulseRunner
 
 
 # %% [config]
@@ -75,7 +80,7 @@ def load_model(path, verbose=True):
     if not mode & stat.S_IXUSR:
         os.chmod(path, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    runner = ImageImpulseRunner(path)
+    runner = _import_runner()(path)
     info = runner.init()
     p = info["model_parameters"]
     if verbose:

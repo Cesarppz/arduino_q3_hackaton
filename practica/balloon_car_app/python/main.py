@@ -1,10 +1,12 @@
-"""App del UNO Q: cámara → YOLO (.eim) → BalloonController → drive(v, w) vía Bridge.
+"""App del UNO Q: cámara → YOLO (brick Object Detection) → BalloonController → drive(v, w) vía Bridge.
 
-En la laptop corre igual sin `arduino.app_utils`: imprime los comandos y,
-con SHOW=1, abre una ventana con el overlay (necesita el build x86_64 del modelo).
+En el UNO Q el modelo lo sirve el brick `arduino:object_detection` (se elige en
+App Lab: Brick Configuration → AI models, desde el proyecto de Edge Impulse).
+En la laptop corre igual sin `arduino.app_utils` con un `.eim` x86_64 local:
+imprime los comandos y, con SHOW=1, abre una ventana con el overlay.
 
 Variables de entorno (opcionales; lo normal es editar las constantes de abajo):
-    EI_MODEL       ruta del .eim (por defecto model.eim junto a este archivo)
+    EI_MODEL       solo laptop: ruta del .eim (por defecto model.eim junto a este archivo)
     CAMERA_ID      índice de la cámara (0)
     TARGET_COLOR   rojo | verde | azul
     CAR_MODE       run (por defecto) | min_sweep | straight | spin  (ver calibrate.py)
@@ -17,7 +19,7 @@ import cv2
 
 from car_core import (BalloonController, BridgeDrive, CarConfig, DriveSender, PrintDrive,
                       classify_detections, draw_car_overlay, get_detections, send_calibration)
-from fomo_core import load_model, run_inference
+from vision import BrickDetector, EimDetector, FrameSource
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -60,27 +62,27 @@ if MODE != "run":
     transport.set_running(1)
     loop = calibrate.make_loop(MODE, transport, sender)
 else:
-    runner, _ = load_model(os.environ.get("EI_MODEL", os.path.join(HERE, "model.eim")))
-    model_w, model_h = runner.dim
-    cam = cv2.VideoCapture(int(os.environ.get("CAMERA_ID", 0)))
-    cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # menos latencia: siempre el frame más nuevo
+    if ON_UNO_Q:
+        detector = BrickDetector(cfg.min_confidence)
+    else:
+        detector = EimDetector(os.environ.get("EI_MODEL", os.path.join(HERE, "model.eim")))
+    model_w, model_h = detector.dim
+    cam = FrameSource(int(os.environ.get("CAMERA_ID", 0)))
     wait_for_start()
     print(f"Objetivo: {cfg.pops_goal} globos {cfg.target_color}")
     ctrl = BalloonController(cfg)
     last = {"state": None, "t": time.monotonic()}
 
     def loop():
-        ok, frame = cam.read()
-        if not ok:
+        frame = cam.read()
+        if frame is None:
             sender.send(0, 0)
             time.sleep(0.1)
             return
         h, w = frame.shape[:2]
         t0 = time.perf_counter()
-        res = run_inference(runner, frame)
-        dets = get_detections(res, w, h, model_w, model_h, runner.resizeMode, cfg.min_confidence)
+        res = detector.infer(frame)
+        dets = get_detections(res, w, h, model_w, model_h, detector.resize_mode, cfg.min_confidence)
         dets = classify_detections(frame, dets, cfg)
         out = ctrl.step(dets, w, h)
         sender.send(out["v"], out["w"])
@@ -112,4 +114,4 @@ if __name__ == "__main__":
         transport.drive(0, 0)
         if MODE == "run":
             cam.release()
-            runner.stop()
+            detector.stop()

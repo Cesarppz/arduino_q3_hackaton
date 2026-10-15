@@ -1,5 +1,6 @@
 name: Balloon Car
 description: "Carro autónomo: YOLO (Edge Impulse) para reventar 3 globos del color indicado."
 ports: []
-bricks: []
+bricks:
+  - arduino:object_detection
 icon: 🎈

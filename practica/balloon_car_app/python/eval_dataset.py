@@ -1,8 +1,10 @@
 """Evalúa el modelo YOLO (.eim) y la lógica del carro con un export de Edge Impulse.
 
     python eval_dataset.py <carpeta_export> --model model.eim [--out overlays/] [--color rojo]
+    python eval_dataset.py <carpeta_export> --brick [--out overlays/]   (UNO Q, brick de App Lab)
     python eval_dataset.py <carpeta_export> --gt [--out overlays/]
 
+- Con --brick: igual, pero con el brick Object Detection de App Lab.
 - Con --model: corre el .eim sobre cada imagen y compara con las cajas
   etiquetadas de info.labels (acierto = misma etiqueta e IoU >= 0.3).
   El .eim tiene que ser de la arquitectura de la máquina (AARCH64 en el UNO Q,
@@ -33,23 +35,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("export")
     ap.add_argument("--model")
+    ap.add_argument("--brick", action="store_true")
     ap.add_argument("--gt", action="store_true")
     ap.add_argument("--out")
     ap.add_argument("--color", default="rojo")
     ap.add_argument("--min-conf", type=float, default=0.5)
     args = ap.parse_args()
-    if not args.model and not args.gt:
-        ap.error("usa --model <.eim> o --gt")
+    if not (args.model or args.brick or args.gt):
+        ap.error("usa --model <.eim>, --brick o --gt")
 
     info = json.load(open(os.path.join(args.export, "info.labels")))
     files = [f for f in info["files"] if f.get("boundingBoxes")]
     print(f"{len(files)} imágenes con cajas de {len(info['files'])}")
 
-    runner = None
-    if args.model:
-        from fomo_core import load_model, run_inference
-        runner, _ = load_model(args.model)
-        model_w, model_h = runner.dim
+    detector = None
+    if args.brick:
+        from vision import BrickDetector
+        detector = BrickDetector(args.min_conf)
+    elif args.model:
+        from vision import EimDetector
+        detector = EimDetector(args.model)
     if args.out:
         os.makedirs(args.out, exist_ok=True)
 
@@ -63,9 +68,9 @@ def main():
         gt = [(b["label"], (b["x"], b["y"], b["x"] + b["width"], b["y"] + b["height"]))
               for b in f["boundingBoxes"]]
 
-        if runner:
-            res = run_inference(runner, img)
-            dets = get_detections(res, w, h, model_w, model_h, runner.resizeMode, cfg.min_confidence)
+        if detector:
+            res = detector.infer(img)
+            dets = get_detections(res, w, h, *detector.dim, detector.resize_mode, cfg.min_confidence)
         else:
             res = {"result": {"bounding_boxes": [
                 {"label": b["label"], "value": 1.0, "x": b["x"], "y": b["y"],
@@ -92,8 +97,8 @@ def main():
         if args.out:
             cv2.imwrite(os.path.join(args.out, f["name"] + ".jpg"), draw_car_overlay(img, out, cfg))
 
-    if runner:
-        runner.stop()
+    if detector:
+        detector.stop()
         prec = tp / max(tp + fp, 1)
         rec = tp / max(tp + fn, 1)
         print(f"\nTP={tp} FP={fp} FN={fn}  precisión={prec:.2f}  recall={rec:.2f}")

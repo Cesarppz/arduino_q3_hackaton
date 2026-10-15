@@ -1,12 +1,20 @@
 # Balloon Car (UNO Q)
 
-Cámara → YOLO-Pro de Edge Impulse (`python/model.eim`, clases `azul` / `rojo` / `verde`) → `BalloonController` (PID sobre `dx`) → `drive(v, w)` vía Bridge → 2 motores DC.
+Cámara → YOLO-Pro de Edge Impulse servido por el **brick Object Detection** (clases `azul` / `rojo` / `verde`) → `BalloonController` (PID sobre `dx`) → `drive(v, w)` vía Bridge → 2 motores DC.
+
+## Modelo (brick Object Detection)
+1. En App Lab, abre el brick **Object Detection** de la app → pestaña **AI models**. Con la cuenta de Edge Impulse vinculada aparece el proyecto `hackaton_arduinoq3` → **Download**.
+2. **Brick Configuration** → elige ese modelo → **Save** (App Lab lo añade a `app.yaml`).
+3. Run. En la consola debe salir `Modelo (brick): ... etiquetas=['azul', 'rojo', 'verde']`. Si salen etiquetas de COCO (`person`, ...), sigue cargado el modelo por defecto.
+
+No hace falta `edge_impulse_linux` en el UNO Q. A cada frame se le hace resize al tamaño de entrada del modelo y se manda como JPEG al brick, así las cajas vuelven en coordenadas del modelo y `get_detections` las pasa al frame.
 
 | Archivo | Qué hace |
 |---|---|
 | `python/main.py` | Loop de la app. **Arriba:** `TARGET_COLOR`, `WAIT_BUTTON`, `MOTOR_CAL` |
 | `python/car_core.py` | Cajas YOLO → detecciones, PID, máquina de estados, overlay. `CarConfig` = parámetros |
-| `python/fomo_core.py` | Carga del `.eim`, inferencia y conversión de coordenadas (compartido con `uno_q_app`) |
+| `python/vision.py` | `BrickDetector` (UNO Q), `EimDetector` (laptop, `.eim` x86_64) y `FrameSource` (cámara) |
+| `python/fomo_core.py` | Conversión de coordenadas; carga de `.eim` local (solo laptop) |
 | `python/calibrate.py` | `CAR_MODE=min_sweep / straight / spin` |
 | `python/eval_dataset.py` | Prueba el modelo y la lógica con un export de Edge Impulse |
 | `sketch/move.cpp`, `move.h` | Motores de la rama `valeria`, **sin cambios** |
@@ -38,6 +46,8 @@ Cámara → YOLO-Pro de Edge Impulse (`python/model.eim`, clases `azul` / `rojo`
 ```bash
 # Lógica con las cajas etiquetadas (laptop, sin modelo)
 python eval_dataset.py ../../hackaton_arduinoq3-export --gt --color rojo --out overlays/
-# Modelo real (en el UNO Q, o en la laptop con el build x86_64)
-python eval_dataset.py <export> --model model.eim --color rojo --out overlays/
+# Modelo real en el UNO Q (brick)
+python eval_dataset.py <export> --brick --color rojo --out overlays/
+# Modelo real en la laptop (build x86_64)
+python eval_dataset.py <export> --model modelo_x86.eim --color rojo --out overlays/
 ```
