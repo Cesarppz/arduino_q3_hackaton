@@ -64,6 +64,7 @@ YOLO por el brick tarda **0.65–1.4 s por frame**, y el sketch para los motores
 | `commit_confirm` | 2 | frames quietos apuntado antes de embestir (≈1–1.5 s) |
 | `v_commit` / `t_commit` / `t_back` | 100 / 1.2 s / 0.5 s | embestida y retroceso |
 | `w_search` / `search_on` / `search_pulses` | 60 / 0.30 s / 16 | búsqueda |
+| `search_pause` | 1.0 s | pausa extra quieto tras cada pulso de búsqueda |
 | `look_settle` / `stale_stop` | 0.35 s / 2 s | frame "quieto" / parar si no llega percepción |
 
 **Calibrar `turn_gain`** con `CAR_MODE=spin`: mide cuántos grados gira en 2 s a `w_align` (45). La cámara C270 tiene unos 60° de campo, así que `dx=1` equivale a unos 30°: `turn_gain ≈ 30 / (grados por segundo)`.

@@ -96,6 +96,7 @@ class CarConfig:
     t_back: float = 0.5
     verify_max: float = 2.5         # VERIFY sin frame quieto en este tiempo → se decide sin verlo
     search_on: float = 0.30         # pulso de giro en SEARCH (más largo = más ángulo por pulso)
+    search_pause: float = 1.0       # pausa extra quieto tras cada pulso antes del siguiente (más = más lento)
     search_wait_max: float = 2.5    # máximo esperando un frame quieto tras el pulso
     search_pulses: int = 16         # pulsos sin ver nada → WANDER
     t_wander: float = 1.0
@@ -354,8 +355,9 @@ class BalloonController:
                     self.confirm = 0
                 if self.state == SEARCH:  # gira un pulso, para y mira con un frame quieto
                     if now >= self.pulse_end:
-                        looked = fresh and self._still(t_frame, self.pulse_end)
-                        if looked or now - self.pulse_end > c.search_wait_max:
+                        # el siguiente pulso espera un frame tomado tras la pausa extra
+                        looked = fresh and self._still(t_frame, self.pulse_end + c.search_pause)
+                        if looked or now - self.pulse_end > c.search_wait_max + c.search_pause:
                             if self.pulses >= c.search_pulses:
                                 self._enter(WANDER, now)
                             else:
