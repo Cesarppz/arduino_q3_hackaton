@@ -1,14 +1,13 @@
-"""App del UNO Q: cámara → FOMO → color → BalloonController → drive(v, w) vía Bridge.
+"""App del UNO Q: cámara → YOLO (.eim) → BalloonController → drive(v, w) vía Bridge.
 
 En la laptop corre igual sin `arduino.app_utils`: imprime los comandos y,
-con SHOW=1, abre una ventana con el overlay.
+con SHOW=1, abre una ventana con el overlay (necesita el build x86_64 del modelo).
 
-Variables de entorno:
+Variables de entorno (opcionales; lo normal es editar las constantes de abajo):
     EI_MODEL       ruta del .eim (por defecto model.eim junto a este archivo)
     CAMERA_ID      índice de la cámara (0)
-    TARGET_COLOR   rojo | verde | azul. Si no se define en el UNO Q, se elige
-                   con el botón del sketch (pulsación corta = color, larga = arrancar)
-    CAR_MODE       run (por defecto) | stop_sweep | straight | spin  (ver calibrate.py)
+    TARGET_COLOR   rojo | verde | azul
+    CAR_MODE       run (por defecto) | min_sweep | straight | spin  (ver calibrate.py)
     SHOW           1 = ventana con overlay (solo laptop)
 """
 import os
@@ -16,23 +15,23 @@ import time
 
 import cv2
 
-from car_core import (COLORS, BalloonController, BridgeDrive, CarConfig, DriveSender, PrintDrive,
-                      classify_detections, draw_car_overlay, send_calibration)
-from fomo_core import get_centroids, load_model, run_inference
+from car_core import (BalloonController, BridgeDrive, CarConfig, DriveSender, PrintDrive,
+                      classify_detections, draw_car_overlay, get_detections, send_calibration)
+from fomo_core import load_model, run_inference
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Calibración de los servos (copiar aquí lo obtenido con calibrate.py).
-# STOP_x: µs en que el servo no gira · K_x_*: µs por unidad de velocidad ·
-# DB_x: µs extra para salir de la zona muerta del servo.
-SERVO_CAL = {
-    "STOP_L": 1500, "STOP_R": 1500,
-    "K_L_FWD": 2.0, "K_L_REV": 2.0,
-    "K_R_FWD": 2.0, "K_R_REV": 2.0,
-    "DB_L": 20, "DB_R": 20,
-}
+# ======== AJUSTAR ANTES DE CADA SALIDA ========
+TARGET_COLOR = os.environ.get("TARGET_COLOR", "rojo")   # rojo | verde | azul
+WAIT_BUTTON = False   # True = no arranca hasta pulsar el botón (D2 a GND)
 
-cfg = CarConfig(target_color=os.environ.get("TARGET_COLOR", "rojo"))
+# Compensación de los motores DC (copiar aquí lo obtenido con calibrate.py):
+#   GAIN_x: % de la velocidad pedida (bajar la del motor que va más rápido)
+#   MIN_x : % a partir del cual la rueda empieza a girar
+MOTOR_CAL = {"GAIN_IZQ": 100, "GAIN_DER": 100, "MIN_IZQ": 20, "MIN_DER": 20}
+# ==============================================
+
+cfg = CarConfig(target_color=TARGET_COLOR)
 MODE = os.environ.get("CAR_MODE", "run")
 SHOW = os.environ.get("SHOW") == "1"
 
@@ -43,21 +42,16 @@ except ImportError:
     ON_UNO_Q = False
 
 transport = BridgeDrive() if ON_UNO_Q else PrintDrive()
-send_calibration(transport, SERVO_CAL)
+send_calibration(transport, MOTOR_CAL)
 sender = DriveSender(transport, heartbeat_s=0.1)
 
 
 def wait_for_start():
-    """Con TARGET_COLOR arranca ya; si no (UNO Q), espera la pulsación larga del botón."""
-    if not ON_UNO_Q or "TARGET_COLOR" in os.environ:
+    if not (ON_UNO_Q and WAIT_BUTTON):
         transport.set_running(1)
         return
-    print("Esperando botón: corta = cambiar color, larga = arrancar")
-    while True:
-        idx = transport.get_color()
-        if idx >= 0:
-            cfg.target_color = COLORS[idx]
-            return
+    print("Esperando el botón para arrancar…")
+    while not transport.get_running():
         time.sleep(0.1)
 
 
@@ -86,8 +80,8 @@ else:
         h, w = frame.shape[:2]
         t0 = time.perf_counter()
         res = run_inference(runner, frame)
-        cents = get_centroids(res, w, h, model_w, model_h, runner.resizeMode, cfg.min_confidence)
-        dets = classify_detections(frame, cents, cfg)
+        dets = get_detections(res, w, h, model_w, model_h, runner.resizeMode, cfg.min_confidence)
+        dets = classify_detections(frame, dets, cfg)
         out = ctrl.step(dets, w, h)
         sender.send(out["v"], out["w"])
         dt_ms = (time.perf_counter() - t0) * 1000

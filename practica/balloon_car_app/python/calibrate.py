@@ -1,42 +1,43 @@
-"""Rutinas de calibración de los servos (se lanzan con CAR_MODE=<modo> en main.py).
+"""Rutinas de calibración de los motores DC (se lanzan con CAR_MODE=<modo> en main.py).
 
-Cada servo de rotación continua tiene su propio punto de parada y su propia
-"fuerza": sin calibrar, el carro no va recto. El PID con cámara corrige el
-resto, pero cuanto mejor calibrado, más rápido y recto llega al globo.
+Cada motor tiene su propio impulso y su propia zona muerta: sin compensar, el
+carro no va recto. El PID con cámara corrige el resto, pero cuanto mejor
+compensado, más rápido y recto llega al globo.
 
 Modos (no interactivos: mira las ruedas y la consola):
-    stop_sweep  barre µs de 1400 a 1600 en cada servo (1 s por valor). Anota
-                el centro del rango donde la rueda está quieta → STOP_L / STOP_R.
-    straight    avanza 2 s a v=60, para 3 s, repite. Si se desvía a la derecha,
-                sube K_R_FWD (o baja K_L_FWD) en SERVO_CAL de main.py.
-                Repetir con v=-60 para los K_*_REV.
-    spin        gira en sitio 2 s a la derecha y 2 s a la izquierda; ambos
-                giros deberían ser parecidos (útil para elegir w_search y kp).
+    min_sweep  sube la velocidad de cada motor de 0 a 50 % (0.5 s por paso).
+               Anota el % en que la rueda EMPIEZA a girar → MIN_IZQ / MIN_DER.
+    straight   avanza 2 s a v=60, para 3 s, retrocede 2 s, para 3 s.
+               Si se desvía a la derecha, el izquierdo va más rápido: baja
+               GAIN_IZQ (o sube GAIN_DER) en MOTOR_CAL de main.py.
+    spin       gira en sitio 2 s a cada lado; ambos giros deberían ser parecidos
+               (útil para elegir w_search y kp). Para el tiempo de 360° está
+               test_calibracion.py de la rama valeria.
 """
 import time
 
-SWEEP = list(range(1400, 1601, 10))
+SWEEP = list(range(0, 51, 2))
+STEP_S = 0.5
 
 
 def make_loop(mode, transport, sender):
     t0 = time.monotonic()
 
-    if mode == "stop_sweep":
+    if mode == "min_sweep":
         state = {"i": -1}
 
         def loop():
-            i = int((time.monotonic() - t0) // 1.0)
+            i = int((time.monotonic() - t0) // STEP_S)
             n = len(SWEEP)
             if i >= 2 * n:
-                transport.raw_us(0, 0)  # 0 = soltar (sin pulso)
-                time.sleep(0.2)
+                time.sleep(0.2)  # sin mensajes → el sketch para los motores
                 return
-            us = SWEEP[i % n]
+            pct = SWEEP[i % n]
             if i != state["i"]:
                 state["i"] = i
-                print(f"{'IZQUIERDO' if i < n else 'DERECHO':10s} {us} µs")
+                print(f"{'IZQUIERDO' if i < n else 'DERECHO':10s} {pct:3d} %")
             # se reenvía cada 50 ms: el sketch para si pasan 300 ms sin mensajes
-            transport.raw_us(us, 0) if i < n else transport.raw_us(0, us)
+            transport.raw_pct(pct, 0) if i < n else transport.raw_pct(0, pct)
             time.sleep(0.05)
         return loop
 

@@ -1,16 +1,22 @@
-"""Carro revienta-globos: color → selección de objetivo → control (v, w) → MCU.
+"""Carro revienta-globos: detecciones YOLO → selección de objetivo → control (v, w) → MCU.
 
-Usa `fomo_core.py` para la inferencia y los centroides. Aquí va todo lo
-específico del reto:
+El modelo es un YOLO-Pro de Edge Impulse (`.eim`, etiquetas `azul`, `rojo`,
+`verde`). A diferencia de FOMO, sus `bounding_boxes` tienen tamaño real, y eso
+se usa para la distancia:
 
-- `verify_color`: confirma con HSV el color de cada centroide FOMO y mide el
-  área del blob (FOMO no da tamaño; el área sirve como estimación de distancia).
-- `BalloonController`: máquina de estados SEARCH → APPROACH → COMMIT → BACKOFF
-  → VERIFY → (SEARCH | DONE) con un PID sobre la desviación horizontal.
+- La cámara va muy baja: la parte de arriba del globo suele salir cortada
+  (caja con y=0). Por eso el centro vertical de la caja no sirve; se usa el
+  **borde inferior** (la base del globo en el suelo): cuanto más abajo, más cerca.
+- El **ancho** de la caja también crece al acercarse.
+
+Piezas:
+- `get_detections`: cajas del SDK → coordenadas del frame + color por etiqueta.
+- `classify_detections`: (opcional) confirma el color con HSV dentro de la caja.
+- `BalloonController`: SEARCH → APPROACH → COMMIT → BACKOFF → VERIFY → (SEARCH | DONE).
 - `DriveSender` + transportes: envían (v, w) en [-100, 100] al sketch.
 
-Convenciones: v > 0 = adelante; w > 0 = girar a la DERECHA (horario visto
-desde arriba). El sketch mezcla L = v + w, R = v − w.
+Convenciones: v > 0 = adelante; w > 0 = girar a la DERECHA. El sketch mezcla
+izquierdo = v + w, derecho = v − w.
 """
 # %% [imports]
 import math
@@ -20,11 +26,11 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from fomo_core import CentroidFilter, compute_deviation, pick_target
+from fomo_core import model_to_frame, pick_target
 
 COLORS = ("rojo", "verde", "azul")
 
-# Palabras que identifican el color en la etiqueta del modelo FOMO
+# Palabras que identifican el color en la etiqueta del modelo
 _LABEL_KEYWORDS = {
     "rojo": ("rojo", "red", "roja"),
     "verde": ("verde", "green"),
@@ -40,20 +46,15 @@ class CarConfig:
 
     # --- Detección / color ---
     min_confidence: float = 0.5
-    use_hsv: bool = True            # confirmar el color con HSV
-    # Rangos HSV de OpenCV (H 0-179). El rojo tiene dos rangos por el "wrap" del tono.
+    # Confirmar el color de YOLO con HSV dentro de la caja. Apagado por defecto:
+    # con el sol de la pista el verde sale casi blanco y HSV lo rechazaría.
+    use_hsv: bool = False
     hsv_ranges: dict = field(default_factory=lambda: {
         "rojo": [((0, 90, 60), (10, 255, 255)), ((170, 90, 60), (179, 255, 255))],
-        "verde": [((40, 70, 50), (85, 255, 255))],
+        "verde": [((35, 50, 50), (85, 255, 255))],
         "azul": [((95, 90, 50), (130, 255, 255))],
     })
-    patch_frac: float = 0.10        # lado del parche HSV (fracción del ancho)
-    min_color_frac: float = 0.15    # fracción mínima de píxeles del color en el parche
-
-    # --- Filtro del objetivo ---
-    smoothing: float = 0.6
-    hold_frames: int = 3
-    confirm_frames: int = 2         # frames seguidos viendo el objetivo para salir de SEARCH
+    min_color_frac: float = 0.15    # fracción mínima de píxeles del color en la caja
 
     # --- PID sobre dx_norm ([-1, 1]) → w ---
     kp: float = 70.0
@@ -61,6 +62,9 @@ class CarConfig:
     kd: float = 8.0
     i_limit: float = 25.0           # anti-windup (en unidades de w)
     w_max: float = 60.0
+    smoothing: float = 0.6          # EMA del punto objetivo (1.0 = sin suavizar)
+    hold_frames: int = 3            # frames que se mantiene el objetivo si YOLO lo pierde
+    confirm_frames: int = 2         # frames seguidos viendo el objetivo para salir de SEARCH
 
     # --- Velocidades (unidades -100..100) ---
     v_max: float = 60.0
@@ -68,15 +72,15 @@ class CarConfig:
     align_dx: float = 0.35          # |dx| mayor → girar en sitio (v = 0)
     v_commit: float = 70.0
     v_back: float = 50.0
-    w_search: float = 35.0
+    w_search: float = 40.0
 
-    # --- Cercanía (el globo está en el suelo: más cerca = más abajo en la imagen) ---
-    near_y: float = 0.70            # cy/H a partir del cual está "cerca"
-    near_area: float = 0.06         # área del blob / área del frame
+    # --- Cercanía (borde inferior de la caja y ancho, en fracción del frame) ---
+    near_bottom: float = 0.60        # dataset: globo a punto de tocar → base ≈ 0.6–0.7
+    near_width: float = 0.45         # dataset: lejos ≈ 0.3, muy cerca ≈ 0.8–0.9
     commit_dx: float = 0.15         # |dx| máximo para embestir
 
     # --- Tiempos (s) ---
-    t_commit: float = 1.0
+    t_commit: float = 0.8
     t_back: float = 0.7
     t_verify: float = 0.5
     search_on: float = 0.15         # pulso de giro en SEARCH
@@ -86,22 +90,42 @@ class CarConfig:
     max_retries: int = 2
 
     # --- Evitar globos de otro color ---
-    corridor: float = 0.30          # medio ancho del corredor (fracción de media imagen)
-    obstacle_y: float = 0.55        # obstáculos más abajo de esto (cy/H) cuentan
+    corridor: float = 0.20          # medio ancho del carro en la imagen (fracción de media imagen)
+    obstacle_bottom: float = 0.30   # solo cuentan los obstáculos con la base más abajo de esto
     k_repel: float = 45.0
 
-    hfov_deg: float = 60.0
-    vfov_deg: float = 45.0
 
-
-# %% [color]
+# %% [detections]
 def label_to_color(label):
-    """Color de una etiqueta FOMO ('globo_rojo', 'red', ...) o None si no lo indica."""
+    """Color de una etiqueta ('rojo', 'globo_red', ...) o None si no lo indica."""
     s = label.lower()
     for color, words in _LABEL_KEYWORDS.items():
         if any(w in s for w in words):
             return color
     return None
+
+
+def get_detections(res, frame_w, frame_h, model_w, model_h, mode, min_confidence=0.5):
+    """Cajas YOLO del SDK en coordenadas del frame.
+
+    Cada detección: label, color, confidence, x1, y1, x2, y2,
+    x (centro horizontal), y (borde inferior = base del globo),
+    width (ancho / W) y bottom (y2 / H).
+    """
+    dets = []
+    for bb in res.get("result", {}).get("bounding_boxes", []):
+        if bb["value"] < min_confidence:
+            continue
+        x1, y1 = model_to_frame(bb["x"], bb["y"], frame_w, frame_h, model_w, model_h, mode)
+        x2, y2 = model_to_frame(bb["x"] + bb["width"], bb["y"] + bb["height"],
+                                frame_w, frame_h, model_w, model_h, mode)
+        x1, x2 = max(0.0, x1), min(float(frame_w), x2)
+        y1, y2 = max(0.0, y1), min(float(frame_h), y2)
+        dets.append({"label": bb["label"], "color": label_to_color(bb["label"]),
+                     "confidence": bb["value"], "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                     "x": (x1 + x2) / 2, "y": y2,
+                     "width": (x2 - x1) / frame_w, "bottom": y2 / frame_h})
+    return dets
 
 
 def color_mask(hsv, color, cfg: CarConfig):
@@ -112,60 +136,31 @@ def color_mask(hsv, color, cfg: CarConfig):
     return mask
 
 
-def verify_color(frame_bgr, cx, cy, cfg: CarConfig):
-    """Color dominante alrededor de (cx, cy) y área relativa de su blob.
-
-    Devuelve (color | None, area_frac). El área se mide en una ventana 3× el
-    parche, tomando el componente conexo que contiene (o está más cerca de) el centro.
-    """
-    h, w = frame_bgr.shape[:2]
-    half = max(12, int(cfg.patch_frac * w / 2))
-    x0, x1 = max(0, int(cx) - half), min(w, int(cx) + half)
-    y0, y1 = max(0, int(cy) - half), min(h, int(cy) + half)
-    if x1 <= x0 or y1 <= y0:
-        return None, 0.0
-    hsv = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+def verify_color(frame_bgr, det, cfg: CarConfig):
+    """Color HSV dominante en la zona central de la caja (sin la base negra) o None."""
+    x1, x2 = det["x1"], det["x2"]
+    y1, y2 = det["y1"], det["y2"]
+    bw, bh = x2 - x1, y2 - y1
+    xa, xb = int(x1 + 0.25 * bw), int(x2 - 0.25 * bw)
+    ya, yb = int(y1 + 0.15 * bh), int(y2 - 0.30 * bh)
+    if xb - xa < 4 or yb - ya < 4:
+        return None
+    hsv = cv2.cvtColor(frame_bgr[ya:yb, xa:xb], cv2.COLOR_BGR2HSV)
     fracs = {c: cv2.countNonZero(color_mask(hsv, c, cfg)) / hsv[..., 0].size for c in COLORS}
     color = max(fracs, key=fracs.get)
-    if fracs[color] < cfg.min_color_frac:
-        return None, 0.0
-
-    big = 3 * half
-    X0, X1 = max(0, int(cx) - big), min(w, int(cx) + big)
-    Y0, Y1 = max(0, int(cy) - big), min(h, int(cy) + big)
-    mask = color_mask(cv2.cvtColor(frame_bgr[Y0:Y1, X0:X1], cv2.COLOR_BGR2HSV), color, cfg)
-    n, labels, stats, cents = cv2.connectedComponentsWithStats(mask)
-    if n <= 1:
-        return color, 0.0
-    px, py = int(cx) - X0, int(cy) - Y0
-    lab = labels[min(py, labels.shape[0] - 1), min(px, labels.shape[1] - 1)]
-    if lab == 0:  # el centro no cae en el blob: el componente más cercano
-        d = [(cents[i][0] - px) ** 2 + (cents[i][1] - py) ** 2 for i in range(1, n)]
-        lab = 1 + int(np.argmin(d))
-    return color, stats[lab, cv2.CC_STAT_AREA] / (w * h)
+    return color if fracs[color] >= cfg.min_color_frac else None
 
 
-def classify_detections(frame_bgr, centroids, cfg: CarConfig):
-    """Añade 'color' y 'area' a cada centroide.
-
-    Si FOMO y HSV no coinciden el color queda en None: se trata como obstáculo
-    (más vale esquivar un globo dudoso que reventar uno equivocado).
-    """
-    dets = []
-    for c in centroids:
-        if c["confidence"] < cfg.min_confidence:
-            continue
-        fomo_color = label_to_color(c["label"])
-        area = 0.0
-        color = fomo_color
-        if cfg.use_hsv and frame_bgr is not None:
-            hsv_color, area = verify_color(frame_bgr, c["x"], c["y"], cfg)
-            if fomo_color is None:
-                color = hsv_color
-            elif hsv_color != fomo_color:
-                color = None
-        dets.append({**c, "color": color, "area": area})
-    return dets
+def classify_detections(frame_bgr, dets, cfg: CarConfig):
+    """Con `use_hsv`, un globo cuyo color YOLO no confirma HSV queda con color None
+    y se trata como obstáculo (más vale esquivar un globo dudoso que reventar uno equivocado)."""
+    if not cfg.use_hsv or frame_bgr is None:
+        return dets
+    out = []
+    for d in dets:
+        hsv_color = verify_color(frame_bgr, d, cfg)
+        out.append({**d, "color": d["color"] if hsv_color == d["color"] else None})
+    return out
 
 
 # %% [pid]
@@ -187,22 +182,47 @@ class PID:
         return float(np.clip(self.kp * err + self.i + self.kd * d, -self.out_limit, self.out_limit))
 
 
+class PointFilter:
+    """EMA del punto objetivo y tolerancia a pérdidas breves (como CentroidFilter)."""
+
+    def __init__(self, smoothing, hold_frames):
+        self.alpha, self.hold_frames = smoothing, hold_frames
+        self.pos, self.det, self.missed = None, None, 0
+
+    def update(self, det):
+        """Devuelve (detección filtrada, held) o (None, False) si se perdió."""
+        if det is not None:
+            if self.pos is None or self.missed > 0:
+                self.pos = (det["x"], det["y"])
+            else:
+                a = self.alpha
+                self.pos = (a * det["x"] + (1 - a) * self.pos[0],
+                            a * det["y"] + (1 - a) * self.pos[1])
+            self.det, self.missed = det, 0
+            return {**det, "x": self.pos[0], "y": self.pos[1]}, False
+        if self.pos is not None and self.missed < self.hold_frames:
+            self.missed += 1
+            return {**self.det, "x": self.pos[0], "y": self.pos[1]}, True
+        self.pos = self.det = None
+        return None, False
+
+
 # %% [controller]
 SEARCH, WANDER, APPROACH, COMMIT, BACKOFF, VERIFY, DONE = (
     "SEARCH", "WANDER", "APPROACH", "COMMIT", "BACKOFF", "VERIFY", "DONE")
 
 
-def _norm_x(d, w):
-    return (d["x"] - w / 2) / (w / 2)
+def _norm_x(x, w):
+    return (x - w / 2) / (w / 2)
 
 
 class BalloonController:
-    """Decide (v, w) a partir de las detecciones clasificadas de cada frame."""
+    """Decide (v, w) a partir de las detecciones de cada frame."""
 
     def __init__(self, cfg: CarConfig):
         self.cfg = cfg
         self.pid = PID(cfg.kp, cfg.ki, cfg.kd, cfg.i_limit, cfg.w_max)
-        self.filter = CentroidFilter(cfg.smoothing, cfg.hold_frames)
+        self.filter = PointFilter(cfg.smoothing, cfg.hold_frames)
         self.popped = 0
         self.retries = 0
         self.search_dir = 1
@@ -218,42 +238,44 @@ class BalloonController:
         self.pid.reset()
         self.confirm = 0
         if state in (SEARCH, WANDER):
-            self.filter = CentroidFilter(self.cfg.smoothing, self.cfg.hold_frames)
+            self.filter = PointFilter(self.cfg.smoothing, self.cfg.hold_frames)
 
-    def _is_near(self, d, h):
-        return d["y"] / h >= self.cfg.near_y or d.get("area", 0.0) >= self.cfg.near_area
+    def _is_near(self, d):
+        return d["bottom"] >= self.cfg.near_bottom or d["width"] >= self.cfg.near_width
 
     def _blocking(self, obstacles, target, w, h):
-        """Obstáculos más cercanos que el objetivo y dentro del corredor hacia él."""
+        """Obstáculos más cercanos que el objetivo cuya caja invade el camino hacia él."""
         out = []
         for o in obstacles:
-            if o["y"] / h < self.cfg.obstacle_y:
+            if o["bottom"] < self.cfg.obstacle_bottom:
                 continue
             if target is not None:
                 if o["y"] <= target["y"]:
                     continue  # está detrás del objetivo
-                # x de la recta (centro inferior → objetivo) a la altura del obstáculo
+                # x de la recta (centro inferior → base del objetivo) a la altura del obstáculo
                 t = (h - o["y"]) / max(h - target["y"], 1)
                 line_x = w / 2 + t * (target["x"] - w / 2)
             else:
                 line_x = w / 2
-            if abs(o["x"] - line_x) / (w / 2) < self.cfg.corridor:
+            gap = max(o["x1"] - line_x, line_x - o["x2"], 0.0)  # 0 si la recta cruza la caja
+            if gap / (w / 2) < self.cfg.corridor:
                 out.append(o)
         return out
 
     def _repel(self, blockers, target, w, h):
-        """Término de giro que aparta el carro de los obstáculos del corredor."""
+        """Término de giro que aparta el carro de los obstáculos del camino."""
         rep = 0.0
         for o in blockers:
-            ox = _norm_x(o, w)
-            closeness = o["y"] / h
-            side = -math.copysign(1.0, ox) if abs(ox) > 0.05 else (
-                1.0 if target is None or target["x"] >= o["x"] else -1.0)
-            rep += side * self.cfg.k_repel * closeness * (1 - min(abs(ox) / self.cfg.corridor, 1))
+            ox = _norm_x(o["x"], w)
+            if target is not None and abs(ox) < 0.05:
+                side = 1.0 if target["x"] >= o["x"] else -1.0
+            else:
+                side = -math.copysign(1.0, ox)
+            rep += side * self.cfg.k_repel * o["bottom"]
         return rep
 
     def step(self, dets, frame_w, frame_h, now=None):
-        """Un paso de control. `dets` viene de `classify_detections`."""
+        """Un paso de control. `dets` viene de `get_detections`/`classify_detections`."""
         c = self.cfg
         now = time.monotonic() if now is None else now
         dt = 0.05 if self.last_t is None else now - self.last_t
@@ -263,7 +285,7 @@ class BalloonController:
         targets = [d for d in dets if d["color"] == c.target_color]
         obstacles = [d for d in dets if d["color"] != c.target_color]
         v = w = 0.0
-        target = pos = None
+        target = None
         blockers = []
 
         if self.state == DONE:
@@ -290,22 +312,20 @@ class BalloonController:
 
         elif self.state == APPROACH:
             free = [t for t in targets if not self._blocking(obstacles, t, frame_w, frame_h)]
-            target = pick_target(free or targets, frame_w, frame_h, "closest_prev", self.filter.pos)
-            pos, held = self.filter.update(target)
-            if pos is None:
-                if self.last_near:  # se perdió por estar demasiado cerca → embestir
+            raw = pick_target(free or targets, frame_w, frame_h, "closest_prev", self.filter.pos)
+            target, held = self.filter.update(raw)
+            if target is None:
+                if self.last_near:  # se perdió estando muy cerca → embestir
                     self._enter(COMMIT, now)
                     v = c.v_commit
                 else:
                     self._enter(SEARCH, now)
             else:
-                ref = target or {"x": pos[0], "y": pos[1], "area": 0.0}
-                dev = compute_deviation(pos, frame_w, frame_h, c.hfov_deg, c.vfov_deg)
-                dx = dev["dx_norm"]
+                dx = _norm_x(target["x"], frame_w)
                 self.search_dir = 1 if dx >= 0 else -1
-                self.last_near = self._is_near(ref, frame_h)
-                blockers = self._blocking(obstacles, ref, frame_w, frame_h)
-                w = self.pid.update(dx, dt) + self._repel(blockers, ref, frame_w, frame_h)
+                self.last_near = self._is_near(target)
+                blockers = self._blocking(obstacles, target, frame_w, frame_h)
+                w = self.pid.update(dx, dt) + self._repel(blockers, target, frame_w, frame_h)
                 if abs(dx) < c.align_dx:
                     v = c.v_min + (c.v_max - c.v_min) * (1 - abs(dx) / c.align_dx)
                 if self.last_near and abs(dx) < c.commit_dx and not blockers and not held:
@@ -313,7 +333,7 @@ class BalloonController:
 
         elif self.state == COMMIT:
             blockers = [o for o in self._blocking(obstacles, None, frame_w, frame_h)
-                        if self._is_near(o, frame_h)]
+                        if self._is_near(o)]
             if blockers or el > c.t_commit:
                 self.aborted = bool(blockers)
                 self._enter(BACKOFF, now)
@@ -321,7 +341,7 @@ class BalloonController:
                 v = c.v_commit
                 if targets:  # corrección fina mientras se siga viendo
                     t = pick_target(targets, frame_w, frame_h, "closest_center")
-                    w = 0.5 * c.kp * _norm_x(t, frame_w)
+                    w = 0.5 * c.kp * _norm_x(t["x"], frame_w)
 
         elif self.state == BACKOFF:
             if el > c.t_back:
@@ -331,7 +351,7 @@ class BalloonController:
 
         elif self.state == VERIFY:
             if el > c.t_verify:
-                still = [t for t in targets if abs(_norm_x(t, frame_w)) < 0.4]
+                still = [t for t in targets if abs(_norm_x(t["x"], frame_w)) < 0.4]
                 if still and self.retries < c.max_retries:
                     self.retries += 1
                     self._enter(APPROACH, now)
@@ -346,7 +366,7 @@ class BalloonController:
         v = float(np.clip(v, -100, 100))
         w = float(np.clip(w, -100, 100))
         return {"v": v, "w": w, "state": self.state, "popped": self.popped,
-                "target": target, "pos": pos, "targets": targets,
+                "target": target, "targets": targets,
                 "obstacles": obstacles, "blockers": blockers}
 
 
@@ -374,14 +394,17 @@ class PrintDrive:
     def drive(self, v, w):
         print(f"→ MCU drive v={v:+4d} w={w:+4d}")
 
-    def set_cal(self, idx, value):
-        print(f"→ MCU set_cal {idx}={value}")
+    def raw_pct(self, left, right):
+        print(f"→ MCU raw_pct L={left:+d} R={right:+d}")
 
-    def raw_us(self, left_us, right_us):
-        print(f"→ MCU raw_us L={left_us} R={right_us}")
+    def set_cal(self, idx, value):
+        print(f"→ MCU set_cal {CAL_KEYS[idx]}={value}")
 
     def set_running(self, on):
         print(f"→ MCU set_running {int(on)}")
+
+    def get_running(self):
+        return 1
 
 
 class BridgeDrive:
@@ -394,30 +417,27 @@ class BridgeDrive:
     def drive(self, v, w):
         self.bridge.call("drive", int(v), int(w))
 
+    def raw_pct(self, left, right):
+        self.bridge.call("raw_pct", int(left), int(right))
+
     def set_cal(self, idx, value):
         self.bridge.call("set_cal", int(idx), int(value))
-
-    def raw_us(self, left_us, right_us):
-        self.bridge.call("raw_us", int(left_us), int(right_us))
 
     def set_running(self, on):
         self.bridge.call("set_running", int(bool(on)))
 
-    def get_color(self):
-        """-1 mientras no se arranca con el botón; si no, 0 rojo, 1 verde, 2 azul."""
-        return int(self.bridge.call("get_color"))
+    def get_running(self):
+        return int(self.bridge.call("get_running"))
 
 
 # Orden de los índices de `set_cal` (igual que CAL[] en sketch.ino)
-CAL_KEYS = ("STOP_L", "STOP_R", "K_L_FWD", "K_L_REV", "K_R_FWD", "K_R_REV", "DB_L", "DB_R")
+CAL_KEYS = ("GAIN_IZQ", "GAIN_DER", "MIN_IZQ", "MIN_DER")
 
 
 def send_calibration(transport, cal: dict):
-    """Envía la calibración de servos. Los K van ×100 (2.0 µs/unidad → 200)."""
     for i, k in enumerate(CAL_KEYS):
         if k in cal:
-            value = cal[k] * 100 if k.startswith("K_") else cal[k]
-            transport.set_cal(i, int(round(value)))
+            transport.set_cal(i, int(round(cal[k])))
 
 
 # %% [overlay]
@@ -428,21 +448,21 @@ def draw_car_overlay(frame, out, cfg: CarConfig, fps=None):
     img = frame.copy()
     h, w = img.shape[:2]
     cv2.line(img, (w // 2, 0), (w // 2, h), (200, 200, 200), 1)
-    ny = int(cfg.near_y * h)
+    ny = int(cfg.near_bottom * h)
     cv2.line(img, (0, ny), (w, ny), (0, 255, 255), 1)
     cw = int(cfg.corridor * w / 2)
-    cv2.rectangle(img, (w // 2 - cw, int(cfg.obstacle_y * h)), (w // 2 + cw, h), (255, 255, 255), 1)
+    cv2.rectangle(img, (w // 2 - cw, int(cfg.obstacle_bottom * h)), (w // 2 + cw, h), (255, 255, 255), 1)
 
     for d in out["targets"] + out["obstacles"]:
-        p = (int(d["x"]), int(d["y"]))
         is_t = d in out["targets"]
-        cv2.circle(img, p, 10 if is_t else 7, _BGR[d["color"]], 2 if is_t else -1)
-        cv2.putText(img, f"{d['color'] or '?'} {d['confidence']:.2f} a={d['area']:.3f}",
-                    (p[0] + 10, p[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, _BGR[d["color"]], 1)
+        col = _BGR[d["color"]]
+        cv2.rectangle(img, (int(d["x1"]), int(d["y1"])), (int(d["x2"]), int(d["y2"])), col, 3 if is_t else 1)
+        cv2.putText(img, f"{d['label']} {d['confidence']:.2f}", (int(d["x1"]) + 4, int(d["y2"]) - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 2)
     for b in out["blockers"]:
         cv2.drawMarker(img, (int(b["x"]), int(b["y"])), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 24, 3)
-    if out["pos"] is not None:
-        p = (int(out["pos"][0]), int(out["pos"][1]))
+    if out["target"] is not None:
+        p = (int(out["target"]["x"]), int(out["target"]["y"]))
         cv2.arrowedLine(img, (w // 2, h), p, (0, 255, 255), 2, tipLength=0.05)
 
     cv2.putText(img, f"{out['state']}  {cfg.target_color}  {out['popped']}/{cfg.pops_goal}",
