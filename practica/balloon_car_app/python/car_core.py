@@ -13,6 +13,7 @@ Piezas:
 - `get_detections`: cajas del SDK → coordenadas del frame + color por etiqueta.
 - `classify_detections`: (opcional) confirma el color con HSV dentro de la caja.
 - `BalloonController`: SEARCH → APPROACH → COMMIT → BACKOFF → VERIFY → (SEARCH | DONE).
+  Se llama a ~20 Hz; YOLO llega mucho más lento y entre frames `step(None, ...)`.
 - `DriveSender` + transportes: envían (v, w) en [-100, 100] al sketch.
 
 Convenciones: v > 0 = adelante; w > 0 = girar a la DERECHA. El sketch mezcla
@@ -57,36 +58,43 @@ class CarConfig:
     min_color_frac: float = 0.15    # fracción mínima de píxeles del color en la caja
 
     # --- PID sobre dx_norm ([-1, 1]) → w ---
-    kp: float = 88.0           # +25 % (antes 70)
-    ki: float = 19.0           # +25 % (antes 15)
-    kd: float = 10.0           # +25 % (antes 8)
+    kp: float = 88.0
+    ki: float = 19.0
+    kd: float = 10.0
     i_limit: float = 31.0           # anti-windup (en unidades de w)
-    w_max: float = 75.0        # +25 % (antes 60)
+    w_max: float = 75.0
     smoothing: float = 0.6          # EMA del punto objetivo (1.0 = sin suavizar)
-    hold_frames: int = 3            # frames que se mantiene el objetivo si YOLO lo pierde
-    confirm_frames: int = 2         # frames seguidos viendo el objetivo para salir de SEARCH
+    hold_frames: int = 2            # frames YOLO que se mantiene el objetivo si se pierde (≈1.4 s)
+    confirm_frames: int = 1         # frames viendo el objetivo para salir de SEARCH (1 = ir ya)
+
+    # --- Control a 20 Hz con YOLO lento (≈0.7 s por frame) ---
+    w_hold: float = 0.3             # s que se aplica el giro tras cada frame (evita pasarse)
+    stale_stop: float = 2.0         # s sin percepción nueva en APPROACH → parar
 
     # --- Velocidades (unidades -100..100) ---
-    v_max: float = 75.0        # +25 % (antes 60)
-    v_min: float = 31.0        # +25 % (antes 25)
-    align_dx: float = 0.35          # |dx| mayor → girar en sitio (v = 0)
-    v_commit: float = 88.0     # +25 % (antes 70)
-    v_back: float = 63.0       # +25 % (antes 50)
-    w_search: float = 50.0     # +25 % (antes 40)
+    v_max: float = 85.0
+    v_min: float = 40.0
+    align_dx: float = 0.5           # |dx| mayor → girar en sitio (v = 0)
+    v_commit: float = 100.0         # embestida a tope
+    v_back: float = 63.0
+    w_search: float = 60.0
+    v_wander: float = 50.0
 
     # --- Cercanía (borde inferior de la caja y ancho, en fracción del frame) ---
-    near_bottom: float = 0.60        # dataset: globo a punto de tocar → base ≈ 0.6–0.7
-    near_width: float = 0.45         # dataset: lejos ≈ 0.3, muy cerca ≈ 0.8–0.9
-    commit_dx: float = 0.15         # |dx| máximo para embestir
+    near_bottom: float = 0.50       # dataset: a punto de tocar ≈ 0.6–0.7; antes por la latencia
+    near_width: float = 0.38        # dataset: lejos ≈ 0.3, muy cerca ≈ 0.8–0.9
+    commit_dx: float = 0.25         # |dx| máximo para embestir
 
     # --- Tiempos (s) ---
-    t_commit: float = 0.8
-    t_back: float = 0.7
-    t_verify: float = 0.5
-    search_on: float = 0.15         # pulso de giro en SEARCH
-    search_off: float = 0.20        # pausa para que la cámara no salga movida
-    search_spin_s: float = 9.0      # tras esto sin ver nada → WANDER
-    t_wander: float = 1.2
+    t_commit: float = 1.2
+    t_back: float = 0.5
+    verify_settle: float = 0.15     # VERIFY usa un frame tomado al menos esto después de parar
+    verify_max: float = 2.5         # sin frame en este tiempo → se decide sin verlo
+    search_on: float = 0.30         # pulso de giro en SEARCH (más largo = más ángulo por pulso)
+    search_settle: float = 0.10     # tras el pulso, mirar con un frame tomado ya parado
+    search_wait_max: float = 2.5    # máximo esperando ese frame
+    search_pulses: int = 16         # pulsos sin ver nada → WANDER
+    t_wander: float = 1.0
     max_retries: int = 2
 
     # --- Evitar globos de otro color ---
@@ -236,7 +244,9 @@ class BalloonController:
         self.confirm = 0
         self.last_near = False
         self.aborted = False        # la última embestida se abortó por un obstáculo
-        self.last_t = None
+        self.last_t = None          # hora del último frame nuevo (dt del PID)
+        self.last_fresh = time.monotonic()
+        self.seen = ([], [])        # (targets, obstacles) del último frame nuevo
         self._enter(SEARCH, time.monotonic())
 
     def _enter(self, state, now):
@@ -244,8 +254,13 @@ class BalloonController:
         self.t_state = now
         self.pid.reset()
         self.confirm = 0
+        self.cmd, self.cmd_t = (0.0, 0.0), now   # último comando calculado con un frame
+        self.target = None
         if state in (SEARCH, WANDER):
             self.filter = PointFilter(self.cfg.smoothing, self.cfg.hold_frames)
+        if state == SEARCH:
+            self.pulses = 0
+            self.pulse_end = now    # primero mirar, luego girar
 
     def _is_near(self, d):
         return d["bottom"] >= self.cfg.near_bottom or d["width"] >= self.cfg.near_width
@@ -281,83 +296,38 @@ class BalloonController:
             rep += side * self.cfg.k_repel * o["bottom"]
         return rep
 
-    def step(self, dets, frame_w, frame_h, now=None):
-        """Un paso de control. `dets` viene de `get_detections`/`classify_detections`."""
+    def _held_w(self, now):
+        """Giro del último frame, solo durante `w_hold` s (luego recto hasta el próximo frame)."""
+        return self.cmd[1] if now - self.cmd_t < self.cfg.w_hold else 0.0
+
+    def step(self, dets, frame_w, frame_h, now=None, t_frame=None):
+        """Un paso de control (llamar a ~20 Hz).
+
+        `dets` viene de `get_detections`/`classify_detections`, o es None si no hay
+        frame nuevo desde el paso anterior: los estados con tiempo siguen avanzando y
+        APPROACH repite el último comando. `t_frame` = hora en que se tomó el frame.
+        """
         c = self.cfg
         now = time.monotonic() if now is None else now
-        dt = 0.05 if self.last_t is None else now - self.last_t
-        self.last_t = now
-        el = now - self.t_state
-
-        targets = [d for d in dets if d["color"] == c.target_color]
-        obstacles = [d for d in dets if d["color"] != c.target_color]
+        fresh = dets is not None
+        dt = 0.05
+        if fresh:
+            t_frame = now if t_frame is None else t_frame
+            if self.last_t is not None:
+                dt = max(now - self.last_t, 1e-3)
+            self.last_t = self.last_fresh = now
+            targets = [d for d in dets if d["color"] == c.target_color]
+            obstacles = [d for d in dets if d["color"] != c.target_color]
+            self.seen = (targets, obstacles)
+        else:
+            targets, obstacles = [], []
         v = w = 0.0
-        target = None
         blockers = []
 
-        if self.state == DONE:
-            pass
-
-        elif self.state in (SEARCH, WANDER):
-            if targets:
-                self.confirm += 1
-                if self.confirm >= c.confirm_frames:
-                    self._enter(APPROACH, now)
-            else:
-                self.confirm = 0
-                if self.state == SEARCH:
-                    if el > c.search_spin_s:
-                        self._enter(WANDER, now)
-                    elif el % (c.search_on + c.search_off) < c.search_on:
-                        w = self.search_dir * c.w_search
-                else:  # WANDER: avanzar un tramo para cambiar de punto de vista
-                    blockers = self._blocking(obstacles, None, frame_w, frame_h)
-                    if el > c.t_wander or blockers:
-                        self._enter(SEARCH, now)
-                    else:
-                        v = c.v_min
-
-        elif self.state == APPROACH:
-            free = [t for t in targets if not self._blocking(obstacles, t, frame_w, frame_h)]
-            raw = pick_target(free or targets, frame_w, frame_h, "closest_prev", self.filter.pos)
-            target, held = self.filter.update(raw)
-            if target is None:
-                if self.last_near:  # se perdió estando muy cerca → embestir
-                    self._enter(COMMIT, now)
-                    v = c.v_commit
-                else:
-                    self._enter(SEARCH, now)
-            else:
-                dx = _norm_x(target["x"], frame_w)
-                self.search_dir = 1 if dx >= 0 else -1
-                self.last_near = self._is_near(target)
-                blockers = self._blocking(obstacles, target, frame_w, frame_h)
-                w = self.pid.update(dx, dt) + self._repel(blockers, target, frame_w, frame_h)
-                if abs(dx) < c.align_dx:
-                    v = c.v_min + (c.v_max - c.v_min) * (1 - abs(dx) / c.align_dx)
-                if self.last_near and abs(dx) < c.commit_dx and not blockers and not held:
-                    self._enter(COMMIT, now)
-
-        elif self.state == COMMIT:
-            blockers = [o for o in self._blocking(obstacles, None, frame_w, frame_h)
-                        if self._is_near(o)]
-            if blockers or el > c.t_commit:
-                self.aborted = bool(blockers)
-                self._enter(BACKOFF, now)
-            else:
-                v = c.v_commit
-                if targets:  # corrección fina mientras se siga viendo
-                    t = pick_target(targets, frame_w, frame_h, "closest_center")
-                    w = 0.5 * c.kp * _norm_x(t["x"], frame_w)
-
-        elif self.state == BACKOFF:
-            if el > c.t_back:
-                self._enter(VERIFY, now)
-            else:
-                v = -c.v_back
-
-        elif self.state == VERIFY:
-            if el > c.t_verify:
+        if self.state == VERIFY:
+            el = now - self.t_state
+            looked = fresh and t_frame >= self.t_state + c.verify_settle
+            if looked or el > c.verify_max:
                 still = [t for t in targets if abs(_norm_x(t["x"], frame_w)) < 0.4]
                 if still and self.retries < c.max_retries:
                     self.retries += 1
@@ -368,13 +338,83 @@ class BalloonController:
                     self.retries = 0
                     self.aborted = False
                     self.last_near = False
+                    # SEARCH ve en este mismo frame si hay otro objetivo y va directo
                     self._enter(DONE if self.popped >= c.pops_goal else SEARCH, now)
+
+        if self.state in (SEARCH, WANDER):
+            if fresh and targets:
+                self.confirm += 1
+                if self.confirm >= c.confirm_frames:
+                    self._enter(APPROACH, now)
+            else:
+                if fresh:
+                    self.confirm = 0
+                if self.state == SEARCH:  # gira un pulso, para y mira con un frame quieto
+                    if now >= self.pulse_end:
+                        looked = fresh and t_frame >= self.pulse_end + c.search_settle
+                        if looked or now - self.pulse_end > c.search_wait_max:
+                            if self.pulses >= c.search_pulses:
+                                self._enter(WANDER, now)
+                            else:
+                                self.pulses += 1
+                                self.pulse_end = now + c.search_on
+                    if self.state == SEARCH and now < self.pulse_end:
+                        w = self.search_dir * c.w_search
+                if self.state == WANDER:  # avanzar un tramo para cambiar de punto de vista
+                    if fresh:
+                        blockers = self._blocking(obstacles, None, frame_w, frame_h)
+                    if now - self.t_state > c.t_wander or blockers:
+                        self._enter(SEARCH, now)
+                    else:
+                        v = c.v_wander
+
+        if self.state == APPROACH:
+            if fresh:
+                free = [t for t in targets if not self._blocking(obstacles, t, frame_w, frame_h)]
+                raw = pick_target(free or targets, frame_w, frame_h, "closest_prev", self.filter.pos)
+                target, held = self.filter.update(raw)
+                if target is None:
+                    self._enter(COMMIT if self.last_near else SEARCH, now)  # perdido muy cerca → embestir
+                else:
+                    self.target = target
+                    dx = _norm_x(target["x"], frame_w)
+                    self.search_dir = 1 if dx >= 0 else -1
+                    self.last_near = self._is_near(target)
+                    blockers = self._blocking(obstacles, target, frame_w, frame_h)
+                    aw = self.pid.update(dx, dt) + self._repel(blockers, target, frame_w, frame_h)
+                    av = 0.0
+                    if abs(dx) < c.align_dx:
+                        av = c.v_min + (c.v_max - c.v_min) * (1 - abs(dx) / c.align_dx)
+                    self.cmd, self.cmd_t = (av, aw), now
+                    if self.last_near and abs(dx) < c.commit_dx and not blockers and not held:
+                        self._enter(COMMIT, now)
+            if self.state == APPROACH and now - self.last_fresh < c.stale_stop:
+                v, w = self.cmd[0], self._held_w(now)
+
+        if self.state == COMMIT:
+            if fresh:
+                blockers = [o for o in self._blocking(obstacles, None, frame_w, frame_h)
+                            if self._is_near(o)]
+                if targets:  # corrección fina mientras se siga viendo
+                    t = pick_target(targets, frame_w, frame_h, "closest_center")
+                    self.cmd, self.cmd_t = (c.v_commit, 0.5 * c.kp * _norm_x(t["x"], frame_w)), now
+            if blockers or now - self.t_state > c.t_commit:
+                self.aborted = bool(blockers)
+                self._enter(BACKOFF, now)
+            else:
+                v, w = c.v_commit, self._held_w(now)
+
+        if self.state == BACKOFF:
+            if now - self.t_state > c.t_back:
+                self._enter(VERIFY, now)
+            else:
+                v = -c.v_back
 
         v = float(np.clip(v, -100, 100))
         w = float(np.clip(w, -100, 100))
-        return {"v": v, "w": w, "state": self.state, "popped": self.popped,
-                "target": target, "targets": targets,
-                "obstacles": obstacles, "blockers": blockers}
+        return {"v": v, "w": w, "state": self.state, "popped": self.popped, "fresh": fresh,
+                "target": self.target if self.state == APPROACH else None,
+                "targets": self.seen[0], "obstacles": self.seen[1], "blockers": blockers}
 
 
 # %% [transports]

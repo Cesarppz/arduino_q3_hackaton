@@ -30,20 +30,32 @@ No hace falta `edge_impulse_linux` en el UNO Q. A cada frame se le hace resize a
 - En el dataset: lejos ≈ `bottom 0.3 / width 0.3`; a punto de tocar ≈ `bottom 0.6–0.7 / width 0.8–0.9`. Por eso `near_bottom=0.60`, `near_width=0.45`.
 - El color sale de la etiqueta. Hay una confirmación HSV opcional (`use_hsv`), **apagada** porque con sol el verde sale casi blanco.
 
-## Modo híbrido YOLO + VitTrack (`USE_TRACKER = True` en `main.py`)
-YOLO por el brick es lento, así que cuando encuentra el globo objetivo, VitTrack (OpenCV, unos ms por frame) lo sigue:
-- **YOLO → tracker:** en `APPROACH`, con el objetivo recién detectado y todavía lejos.
-- **Verificación:** cada `VERIFY_EVERY_S` (3 s; probar entre 2 y 4) se lanza YOLO en segundo plano sin parar el control. Se suelta el tracker si YOLO ve otro color en esa caja, si hay un globo de otro color en el camino o si no ve el globo 2 veces seguidas.
-- **Tracker → YOLO** (en el mismo frame) también si baja el score del tracker (`track_min_score`), si el globo ya está **cerca** (la embestida y el aborto se deciden con YOLO) o si cambia el estado.
-- Mientras se sigue con el tracker solo se ven los otros globos en cada verificación; cerca del objetivo se vuelve a YOLO en cada frame.
-- La consola muestra `YOLO → tracker` / `tracker → YOLO (motivo)`. Si OpenCV no tiene `TrackerVit` (hace falta ≥ 4.9), avisa y sigue solo con YOLO.
-- `TRACKER_MODEL` en `main.py` permite usar el `_int8bq.onnx` (más rápido; copiarlo a `python/`) si la OpenCV de la placa lo carga.
+## Control a 20 Hz (desacoplado de YOLO)
+YOLO por el brick tarda **0.65–1.15 s por frame** y el sketch para los motores si pasan 300 ms sin comando. Con un comando por frame, el carro se movía 0.3 s y se paraba, así que la embestida casi no empujaba y los pulsos de búsqueda giraban poco.
+- La cámara y YOLO van en un hilo (`PerceptionThread` en `main.py`). El control corre cada `CONTROL_DT` (50 ms) y manda un comando al menos cada 100 ms.
+- Entre frames se llama a `ctrl.step(None, …)`. La embestida, el retroceso y los pulsos avanzan con el reloj, y APPROACH repite el último comando: gira solo `w_hold` (0.3 s) tras cada frame para no pasarse y mantiene `v`.
+- SEARCH **gira y mira**: da un pulso de `search_on` a `w_search`, se para y espera un frame tomado ya quieto (sin que salga movido). Tras `search_pulses` pulsos sin ver nada pasa a WANDER.
+- En cuanto ve un globo objetivo, va a por él en ese mismo frame (`confirm_frames=1`). Tras reventarlo, si en el frame de VERIFY ya se ve otro, va directo a por él.
 
-## Velocidades (+25 % tras la primera prueba en pista)
-`v_max 75`, `v_min 31`, `v_commit 88`, `v_back 63`, `w_search 50`, `w_max 75`, `kp/ki/kd 88/19/10`, `k_repel 56`. Los tiempos (`t_commit`, `t_back`) no cambiaron, así que la embestida llega más lejos.
+| Parámetro (`CarConfig`) | Valor | Para qué |
+|---|---|---|
+| `v_commit` / `t_commit` | 100 / 1.2 s | embestida a tope |
+| `near_bottom` / `near_width` / `commit_dx` | 0.50 / 0.38 / 0.25 | embiste antes, compensando la latencia |
+| `v_max` / `v_min` / `align_dx` | 85 / 40 / 0.5 | se acerca más rápido y avanza aunque el globo esté de lado |
+| `w_search` / `search_on` / `search_pulses` | 60 / 0.30 s / 16 | más ángulo por pulso y más vueltas antes de WANDER |
+| `t_back` | 0.5 s | retroceso |
+| `w_hold` / `stale_stop` | 0.3 s / 2 s | giro tras cada frame / parar si no llega percepción |
+
+Si el carro **se pasa** al girar hacia el globo, baja `w_hold` o `kp`. Si en SEARCH gira **demasiado por pulso** y se salta globos, baja `search_on`.
+
+## Modo híbrido YOLO + VitTrack (`USE_TRACKER`, apagado)
+**No funciona en la placa:** su OpenCV 4.13 viene sin el módulo dnn que usa VitTrack (`the tracking module needs to be built with opencv_dnn`), y no se puede instalar otra porque la versión está fijada (por eso `requirements.txt` ya no pide OpenCV). Sigue disponible en la laptop.
+- **YOLO → tracker:** en `APPROACH`, con el objetivo recién detectado y todavía lejos.
+- **Verificación:** cada `VERIFY_EVERY_S` se lanza YOLO en segundo plano. Se suelta el tracker si YOLO ve otro color en esa caja, si hay un globo de otro color en el camino o si no ve el globo 2 veces seguidas.
+- **Tracker → YOLO** también si baja el score, si el globo ya está cerca o si cambia el estado.
 
 ## Estados
-`SEARCH` (gira a pulsos) → `APPROACH` (PID; esquiva otros colores) → `COMMIT` (embestida recta `t_commit`) → `BACKOFF` → `VERIFY` (¿sigue el globo? si no, +1) → `SEARCH` … `DONE` a los 3.
+`SEARCH` (gira y mira) → `APPROACH` (PID; esquiva otros colores) → `COMMIT` (embestida a 100 durante `t_commit`) → `BACKOFF` → `VERIFY` (con un frame tomado ya parado: ¿sigue el globo? reintento; si no, +1 y a por el siguiente) → `SEARCH` … `DONE` a los 3.
 
 ## Conexiones (de la rama `valeria`)
 | Motor | Dirección | PWM |
@@ -56,7 +68,7 @@ YOLO por el brick es lento, así que cuando encuentra el globo objetivo, VitTrac
 1. Calibrar con las ruedas al aire: `CAR_MODE=min_sweep` → `MIN_IZQ / MIN_DER`. En el suelo: `CAR_MODE=straight` → `GAIN_*`. Copiar a `MOTOR_CAL` en `main.py`.
 2. Si el carro gira al revés de lo esperado (globo a la derecha → gira a la izquierda), revisar el sentido en `move.cpp` o cambiar el signo de `w` en `drive()` del sketch.
 3. `TARGET_COLOR` en `main.py` → Run.
-4. Ajuste en pista (`CarConfig` en `car_core.py`): `kp/ki/kd`, `v_max`, `near_bottom`, `near_width`, `t_commit`.
+4. Ajuste en pista (`CarConfig` en `car_core.py`): `kp/ki/kd`, `w_hold`, `v_max`, `near_bottom`, `near_width`, `t_commit`, `search_on`.
 
 ## Probar
 ```bash
