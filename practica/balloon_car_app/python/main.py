@@ -1,4 +1,4 @@
-"""App del UNO Q: cámara → YOLO (brick Object Detection) → BalloonController → drive(v, w) vía Bridge.
+"""App del UNO Q: cámara → YOLO (brick Object Detection) [+ VitTrack] → BalloonController → drive(v, w) vía Bridge.
 
 En el UNO Q el modelo lo sirve el brick `arduino:object_detection` (se elige en
 App Lab: Brick Configuration → AI models, desde el proyecto de Edge Impulse).
@@ -18,7 +18,8 @@ import time
 import cv2
 
 from car_core import (BalloonController, BridgeDrive, CarConfig, DriveSender, PrintDrive,
-                      classify_detections, draw_car_overlay, get_detections, send_calibration)
+                      draw_car_overlay, send_calibration)
+from tracker import BalloonTracker, HybridPerception
 from vision import BrickDetector, EimDetector, FrameSource
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -31,9 +32,16 @@ WAIT_BUTTON = False   # True = no arranca hasta pulsar el botón (D2 a GND)
 #   GAIN_x: % de la velocidad pedida (bajar la del motor que va más rápido)
 #   MIN_x : % a partir del cual la rueda empieza a girar
 MOTOR_CAL = {"GAIN_IZQ": 100, "GAIN_DER": 100, "MIN_IZQ": 20, "MIN_DER": 20}
+
+# Modo híbrido: YOLO detecta, VitTrack sigue al globo y YOLO lo re-verifica
+# cada VERIFY_EVERY_S segundos. False = YOLO en cada frame.
+USE_TRACKER = True
+VERIFY_EVERY_S = 3.0
+# El int8bq es más rápido pero necesita una OpenCV reciente; si no carga, usar el fp32.
+TRACKER_MODEL = "object_tracking_vittrack_2023sep.onnx"
 # ==============================================
 
-cfg = CarConfig(target_color=TARGET_COLOR)
+cfg = CarConfig(target_color=TARGET_COLOR, use_tracker=USE_TRACKER, verify_every=VERIFY_EVERY_S)
 MODE = os.environ.get("CAR_MODE", "run")
 SHOW = os.environ.get("SHOW") == "1"
 
@@ -66,7 +74,14 @@ else:
         detector = BrickDetector(cfg.min_confidence)
     else:
         detector = EimDetector(os.environ.get("EI_MODEL", os.path.join(HERE, "model.eim")))
-    model_w, model_h = detector.dim
+    tracker = None
+    if cfg.use_tracker:
+        try:
+            tracker = BalloonTracker(os.path.join(HERE, TRACKER_MODEL), cfg.track_min_score)
+            print(f"Tracker VitTrack: {TRACKER_MODEL} (verificación YOLO cada {cfg.verify_every:.1f} s)")
+        except Exception as e:  # noqa: BLE001 — sin tracker la app sigue con YOLO
+            print(f"AVISO: tracker desactivado, solo YOLO ({e})")
+    perception = HybridPerception(detector, cfg, tracker)
     cam = FrameSource(int(os.environ.get("CAMERA_ID", 0)))
     wait_for_start()
     print(f"Objetivo: {cfg.pops_goal} globos {cfg.target_color}")
@@ -80,23 +95,21 @@ else:
             time.sleep(0.1)
             return
         h, w = frame.shape[:2]
-        t0 = time.perf_counter()
-        res = detector.infer(frame)
-        dets = get_detections(res, w, h, model_w, model_h, detector.resize_mode, cfg.min_confidence)
-        dets = classify_detections(frame, dets, cfg)
+        dets = perception.get(frame, ctrl)
         out = ctrl.step(dets, w, h)
         sender.send(out["v"], out["w"])
-        dt_ms = (time.perf_counter() - t0) * 1000
+        perception.after_step(frame, out, ctrl)
 
         if out["state"] != last["state"]:
             print(f"[{out['state']:8s}] globos={out['popped']}/{cfg.pops_goal} "
-                  f"objetivos={len(out['targets'])} otros={len(out['obstacles'])} ({dt_ms:.0f} ms)")
+                  f"objetivos={len(out['targets'])} otros={len(out['obstacles'])} "
+                  f"({perception.mode} {perception.ms:.0f} ms)")
             last["state"] = out["state"]
         if SHOW:
             now = time.monotonic()
             fps = 1 / max(now - last["t"], 1e-3)
             last["t"] = now
-            cv2.imshow("balloon car", draw_car_overlay(frame, out, cfg, fps))
+            cv2.imshow("balloon car", draw_car_overlay(frame, out, cfg, fps, perception.status()))
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 raise KeyboardInterrupt
 
@@ -114,4 +127,5 @@ if __name__ == "__main__":
         transport.drive(0, 0)
         if MODE == "run":
             cam.release()
+            perception.stop()
             detector.stop()

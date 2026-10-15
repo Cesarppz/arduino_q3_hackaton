@@ -9,6 +9,19 @@ modelo, para que `car_core.get_detections` funcione igual con los dos.
 """
 import cv2
 
+# Etiquetas del Impulse #1 de hackaton_arduinoq3. Si el brick carga otro modelo
+# (p. ej. el YOLOX de COCO por defecto) la app se niega a arrancar.
+EXPECTED_LABELS = {"azul", "rojo", "verde"}
+
+
+def check_labels(labels, origin):
+    found = set(labels)
+    if found != EXPECTED_LABELS:
+        raise RuntimeError(
+            f"{origin}: el modelo cargado tiene etiquetas {sorted(found)[:10]}, se esperaban "
+            f"{sorted(EXPECTED_LABELS)}. No es el Impulse #1 de hackaton_arduinoq3: revisa "
+            "EI_OBJ_DETECTION_MODEL en app.yaml y que el .eim esté en esa ruta de la placa.")
+
 
 class BrickDetector:
     """Brick Object Detection de App Lab (runner HTTP del modelo de Edge Impulse).
@@ -26,8 +39,9 @@ class BrickDetector:
         info = self.brick._model_info
         self.dim = (info.image_input_width, info.image_input_height)
         self.min_confidence = min_confidence
-        print(f"Modelo (brick): {getattr(info, 'name', '?')}  tipo={info.model_type}  "
-              f"entrada={self.dim[0]}x{self.dim[1]}  etiquetas={info.labels}")
+        print(f"Modelo (brick): {getattr(info, 'name', '?')} (proyecto {getattr(info, 'project_id', '?')})  "
+              f"tipo={info.model_type}  entrada={self.dim[0]}x{self.dim[1]}  etiquetas={info.labels}")
+        check_labels(info.labels, "Brick Object Detection")
 
     def infer(self, frame_bgr):
         small = cv2.resize(frame_bgr, self.dim, interpolation=cv2.INTER_AREA)
@@ -52,7 +66,8 @@ class EimDetector:
 
     def __init__(self, model_path, min_confidence=0.5):
         from fomo_core import load_model
-        self.runner, _ = load_model(model_path)
+        self.runner, info = load_model(model_path)
+        check_labels(info["model_parameters"]["labels"], model_path)
         self.dim = self.runner.dim
         self.resize_mode = self.runner.resizeMode
 

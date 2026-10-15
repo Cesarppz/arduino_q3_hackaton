@@ -57,22 +57,22 @@ class CarConfig:
     min_color_frac: float = 0.15    # fracción mínima de píxeles del color en la caja
 
     # --- PID sobre dx_norm ([-1, 1]) → w ---
-    kp: float = 70.0
-    ki: float = 15.0
-    kd: float = 8.0
-    i_limit: float = 25.0           # anti-windup (en unidades de w)
-    w_max: float = 60.0
+    kp: float = 88.0           # +25 % (antes 70)
+    ki: float = 19.0           # +25 % (antes 15)
+    kd: float = 10.0           # +25 % (antes 8)
+    i_limit: float = 31.0           # anti-windup (en unidades de w)
+    w_max: float = 75.0        # +25 % (antes 60)
     smoothing: float = 0.6          # EMA del punto objetivo (1.0 = sin suavizar)
     hold_frames: int = 3            # frames que se mantiene el objetivo si YOLO lo pierde
     confirm_frames: int = 2         # frames seguidos viendo el objetivo para salir de SEARCH
 
     # --- Velocidades (unidades -100..100) ---
-    v_max: float = 60.0
-    v_min: float = 25.0
+    v_max: float = 75.0        # +25 % (antes 60)
+    v_min: float = 31.0        # +25 % (antes 25)
     align_dx: float = 0.35          # |dx| mayor → girar en sitio (v = 0)
-    v_commit: float = 70.0
-    v_back: float = 50.0
-    w_search: float = 40.0
+    v_commit: float = 88.0     # +25 % (antes 70)
+    v_back: float = 63.0       # +25 % (antes 50)
+    w_search: float = 50.0     # +25 % (antes 40)
 
     # --- Cercanía (borde inferior de la caja y ancho, en fracción del frame) ---
     near_bottom: float = 0.60        # dataset: globo a punto de tocar → base ≈ 0.6–0.7
@@ -92,7 +92,14 @@ class CarConfig:
     # --- Evitar globos de otro color ---
     corridor: float = 0.20          # medio ancho del carro en la imagen (fracción de media imagen)
     obstacle_bottom: float = 0.30   # solo cuentan los obstáculos con la base más abajo de esto
-    k_repel: float = 45.0
+    k_repel: float = 56.0      # +25 % (antes 45)
+
+    # --- Modo híbrido YOLO + VitTrack (tracker.py) ---
+    use_tracker: bool = True        # seguir el objetivo con VitTrack entre inferencias YOLO
+    verify_every: float = 3.0       # s entre verificaciones YOLO mientras se sigue (2–4)
+    track_min_score: float = 0.4    # score del tracker por debajo → se suelta
+    verify_iou: float = 0.3         # IoU mínimo entre la caja seguida y la de YOLO
+    verify_misses: int = 2          # verificaciones seguidas sin ver el globo → se suelta
 
 
 # %% [detections]
@@ -444,7 +451,7 @@ def send_calibration(transport, cal: dict):
 _BGR = {"rojo": (0, 0, 255), "verde": (0, 200, 0), "azul": (255, 80, 0), None: (160, 160, 160)}
 
 
-def draw_car_overlay(frame, out, cfg: CarConfig, fps=None):
+def draw_car_overlay(frame, out, cfg: CarConfig, fps=None, perception=None):
     img = frame.copy()
     h, w = img.shape[:2]
     cv2.line(img, (w // 2, 0), (w // 2, h), (200, 200, 200), 1)
@@ -469,6 +476,8 @@ def draw_car_overlay(frame, out, cfg: CarConfig, fps=None):
                 (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
     cv2.putText(img, f"v={out['v']:+.0f} w={out['w']:+.0f}", (10, 52),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+    if perception:
+        cv2.putText(img, perception, (10, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
     if fps is not None:
         cv2.putText(img, f"{fps:.1f} FPS", (10, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     return img

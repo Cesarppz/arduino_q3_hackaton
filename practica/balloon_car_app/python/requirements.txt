@@ -1,2 +1,2 @@
-opencv-python-headless
+opencv-python-headless>=4.9   # 4.9+ trae cv2.TrackerVit
 numpy

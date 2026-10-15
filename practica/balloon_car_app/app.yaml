@@ -2,5 +2,10 @@ name: Balloon Car
 description: "Carro autónomo: YOLO (Edge Impulse) para reventar 3 globos del color indicado."
 ports: []
 bricks:
-  - arduino:object_detection
+  - arduino:object_detection:
+      # Modelo fijo: proyecto hackaton_arduinoq3 (soraya), Impulse #1, etiquetas azul/rojo/verde.
+      # Estas variables pisan el modelo elegido en la UI de App Lab.
+      # El .eim (build Linux AARCH64) se copia a esta ruta en la placa; ver README.
+      variables:
+        EI_OBJ_DETECTION_MODEL: /home/arduino/.arduino-bricks/ei-models/hackaton_arduinoq3-impulse-1.eim
 icon: 🎈
