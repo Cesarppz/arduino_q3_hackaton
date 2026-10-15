@@ -1,7 +1,7 @@
 """Rutinas de calibración de los motores DC (se lanzan con CAR_MODE=<modo> en main.py).
 
 Cada motor tiene su propio impulso y su propia zona muerta: sin compensar, el
-carro no va recto. El PID con cámara corrige el resto, pero cuanto mejor
+carro no va recto. La cámara corrige el resto, pero cuanto mejor
 compensado, más rápido y recto llega al globo.
 
 Modos (no interactivos: mira las ruedas y la consola):
@@ -11,8 +11,10 @@ Modos (no interactivos: mira las ruedas y la consola):
                Si se desvía a la derecha, el izquierdo va más rápido: baja
                GAIN_IZQ (o sube GAIN_DER) en MOTOR_CAL de main.py.
     spin       gira en sitio 2 s a cada lado; ambos giros deberían ser parecidos
-               (útil para elegir w_search y kp). Para el tiempo de 360° está
-               test_calibracion.py de la rama valeria.
+               (útil para elegir w_search y turn_gain). Para turn_gain: grados
+               girados en 2 s → °/s a esa w; con la cámara de ~60° de campo,
+               dx=1 son ~30°, así que turn_gain ≈ 30 / (°/s a w_align).
+               Para el tiempo de 360° está test_calibracion.py de la rama valeria.
 """
 import time
 

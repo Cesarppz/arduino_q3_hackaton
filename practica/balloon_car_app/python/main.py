@@ -1,4 +1,4 @@
-"""App del UNO Q: cámara → YOLO (brick Object Detection) [+ VitTrack] → BalloonController → drive(v, w) vía Bridge.
+"""App del UNO Q: cámara → YOLO "globo" (brick Object Detection) → color HSV [+ VitTrack] → BalloonController → drive(v, w) vía Bridge.
 
 YOLO por el brick tarda ~0.7 s por frame y el sketch para los motores a los
 300 ms sin comando, así que la percepción va en un hilo aparte y el control
@@ -163,6 +163,8 @@ else:
                   f"objetivos={len(out['targets'])} otros={len(out['obstacles'])} "
                   f"v={out['v']:+.0f} w={out['w']:+.0f} ({perception.mode} {perception.ms:.0f} ms)")
             last["state"] = out["state"]
+        if out["note"]:  # qué decidió con este frame y por qué
+            print(f"    {out['note']}")
         if SHOW and item is not None:
             fps = 1 / max(t0 - last["t"], 1e-3)
             last["t"] = t0

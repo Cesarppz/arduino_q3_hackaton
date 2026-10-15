@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 
-from car_core import APPROACH, classify_detections, get_detections, label_to_color
+from car_core import APPROACH, classify_detections, get_detections
 
 
 def iou(a, b):
@@ -44,7 +44,7 @@ class BalloonTracker:
         self.params.net = model_path
         self.min_score = min_score
         self.tracker = cv2.TrackerVit_create(self.params)  # falla aquí si el .onnx no carga
-        self.label = None
+        self.label = self.color = None
         self.score = 0.0
 
     def init(self, frame, det):
@@ -53,6 +53,7 @@ class BalloonTracker:
         w, h = max(int(det["x2"] - x1), 2), max(int(det["y2"] - y1), 2)
         self.tracker.init(frame, (x1, y1, w, h))
         self.label = det["label"]
+        self.color = det["color"]  # el color lo decidió HSV, no la etiqueta
         self.score = 1.0
 
     def update(self, frame):
@@ -64,7 +65,7 @@ class BalloonTracker:
         fh, fw = frame.shape[:2]
         x1, y1 = max(0.0, float(x)), max(0.0, float(y))
         x2, y2 = min(float(fw), float(x + w)), min(float(fh), float(y + h))
-        return {"label": self.label, "color": label_to_color(self.label), "confidence": self.score,
+        return {"label": self.label, "color": self.color, "confidence": self.score,
                 "x1": x1, "y1": y1, "x2": x2, "y2": y2, "x": (x1 + x2) / 2, "y": y2,
                 "width": (x2 - x1) / fw, "bottom": y2 / fh, "tracked": True}
 

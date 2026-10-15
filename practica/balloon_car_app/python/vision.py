@@ -9,18 +9,21 @@ modelo, para que `car_core.get_detections` funcione igual con los dos.
 """
 import cv2
 
-# Etiquetas del Impulse #1 de hackaton_arduinoq3. Si el brick carga otro modelo
-# (p. ej. el YOLOX de COCO por defecto) la app se niega a arrancar.
-EXPECTED_LABELS = {"azul", "rojo", "verde"}
+# El modelo detecta globos: una sola clase (p. ej. "globo") y el color lo decide
+# HSV (car_core.classify_detections). También vale el modelo antiguo de 3 colores
+# (Impulse #1 de hackaton_arduinoq3): su etiqueta se ignora y el color sale de HSV.
+OLD_COLOR_LABELS = {"azul", "rojo", "verde"}
 
 
 def check_labels(labels, origin):
     found = set(labels)
-    if found != EXPECTED_LABELS:
-        raise RuntimeError(
-            f"{origin}: el modelo cargado tiene etiquetas {sorted(found)[:10]}, se esperaban "
-            f"{sorted(EXPECTED_LABELS)}. No es el Impulse #1 de hackaton_arduinoq3: revisa "
-            "el modelo elegido en App Lab (Brick Configuration → AI models).")
+    if len(found) == 1 or found == OLD_COLOR_LABELS:
+        print(f"Etiquetas {sorted(found)} → color por HSV")
+        return
+    raise RuntimeError(
+        f"{origin}: el modelo cargado tiene etiquetas {sorted(found)[:10]}; se esperaba un modelo "
+        "de una sola clase (globo). Revisa el modelo elegido en App Lab "
+        "(Brick Configuration → AI models): ¿es el YOLOX de COCO por defecto?")
 
 
 class BrickDetector:
