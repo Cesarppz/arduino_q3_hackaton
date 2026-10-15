@@ -1,0 +1,170 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
+ *
+ * SPDX-License-Identifier: MPL-2.0
+ */
+
+@import url('fonts/roboto-mono.css');
+
+/*
+ * This CSS is used to center the various elements on the screen
+ */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans',
+    'Helvetica Neue', sans-serif;
+  background-color: #ecf1f1;
+  color: #2c353a;
+  padding: 24px 40px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 32px;
+}
+
+.arduino-text {
+  color: #008184;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+  font-style: normal;
+  line-height: 170%;
+  letter-spacing: 0.28px;
+}
+
+.arduino-logo {
+  height: 24px;
+  width: auto;
+}
+
+.container {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/*
+ * Contenedor y estilos de botones de control de LED
+ */
+.led-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 280px;
+  margin-bottom: 24px;
+  padding-top: 20px;
+}
+
+.btn-control {
+  width: 100%;
+  padding: 14px 20px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Roboto Mono', monospace;
+  font-weight: 600;
+  font-size: 14px;
+  text-align: center;
+  outline: none;
+  border: 2px solid #c9d2d2;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+}
+
+/* Estilo específico para LED Rojo */
+.btn-red {
+  background: #f8d7da;
+  color: #721c24;
+  border-color: #f5c6cb;
+}
+.btn-red:hover {
+  background: #f1b0b7;
+  transform: scale(1.02);
+}
+
+/* Estilo específico para LED Verde */
+.btn-green {
+  background: #d4edda;
+  color: #155724;
+  border-color: #c3e6cb;
+}
+.btn-green:hover {
+  background: #b1dfbb;
+  transform: scale(1.02);
+}
+
+/* Estilo específico para Ambos / Azul */
+.btn-blue {
+  background: #cce5ff;
+  color: #004085;
+  border-color: #b8daff;
+}
+.btn-blue:hover {
+  background: #b8daff;
+  transform: scale(1.02);
+}
+
+/* Estilo para el botón de Apagar */
+.btn-off {
+  background: #dae3e3;
+  color: #2c353a;
+  border-color: #c9d2d2;
+}
+.btn-off:hover {
+  background: #c9d2d2;
+  transform: scale(1.02);
+}
+
+.btn-control:active {
+  transform: scale(0.98);
+}
+
+.instruction-text {
+  font-size: 14px;
+  font-style: normal;
+  font-weight: 400;
+  line-height: 160%;
+  letter-spacing: 0.12px;
+  color: #2c353a;
+}
+
+.error-message {
+  margin-top: 20px;
+  padding: 10px;
+  border-radius: 5px;
+  background-color: #f8d7da;
+  color: #721c24;
+  border: 1px solid #f5c6cb;
+}
+
+/*
+ * Responsive design
+ */
+@media (max-width: 768px) {
+  body {
+    padding: 12px 20px;
+  }
+
+  .arduino-text {
+    font-size: 14px;
+  }
+
+  .arduino-logo {
+    height: 16px;
+    width: auto;
+  }
+}

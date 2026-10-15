@@ -1,0 +1,44 @@
+<!--
+SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
+
+SPDX-License-Identifier: MPL-2.0
+-->
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Control de LEDs y Globos - Robot</title>
+    <link rel="icon" type="image/png" href="./img/favicon.png" />
+    <link rel="stylesheet" type="text/css" href="style.css" />
+  </head>
+  <body>
+    <div class="main-wrapper">
+      <div class="header">
+        <h1 class="arduino-text">Control de LEDs Robot</h1>
+        <img class="arduino-logo" src="./img/RGB-Arduino-Logo_Color Inline Loop.svg" alt="Arduino Logo" />
+      </div>
+
+      <div class="container">
+        <!-- Panel de Botones para los LEDs -->
+        <div class="controls-grid">
+          <button id="btn-rojo" class="btn-control btn-red">Encender LED Rojo</button>
+          <button id="btn-verde" class="btn-control btn-green">Encender LED Verde</button>
+          <button id="btn-azul" class="btn-control btn-blue">Encender Ambos (Azul)</button>
+          <button id="btn-apagar" class="btn-control btn-off">Apagar Todos</button>
+        </div>
+
+        <!-- Instruction Text -->
+        <p class="instruction-text">Selecciona un color para el robot o apágalo 👆</p>
+
+        <!-- Error message container -->
+        <div id="error-container" class="error-message" style="display: none"></div>
+      </div>
+    </div>
+
+    <script src="libs/socket.io.min.js"></script>
+    <script src="libs/arduino.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
