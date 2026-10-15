@@ -63,6 +63,12 @@ void PararMotores() {
 }
 
 
+void GoBack(int velocidad) {
+  Go(-velocidad);
+
+}
+
+
 void GoMotores(String comando) {
 
   int espacio = comando.indexOf(' ');
@@ -93,6 +99,9 @@ void GoMotores(String comando) {
   }
   else if (accion.equalsIgnoreCase("STOP")) {
      PararMotores();
+  }
+  else if (accion.equalsIgnoreCase("BACK")) {
+   GoBack(velocidad);
   }
 }
 

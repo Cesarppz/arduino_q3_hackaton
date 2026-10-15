@@ -18,6 +18,7 @@ void MotorDerecho(int velocidad);
 void Go(int velocidad);
 void PararMotores();
 void GoMotores(String comando);
+void GoBack(int velocidad);
 void ConfigurarMotores();
 
 
