@@ -51,7 +51,8 @@ def make_loop(mode, transport, sender):
             else:
                 v, w = (0, 50) if ph < 2 else (0, 0) if ph < 5 else (0, -50) if ph < 7 else (0, 0)
             if sender.send(v, w) and (v or w):
-                print(f"v={v:+d} w={w:+d}")
+                hint = "  (spin: w>0 debe girar a la DERECHA; si no, cambia TURN_SIGN)" if w else ""
+                print(f"v={v:+d} w={w:+d}{hint}")
             time.sleep(0.05)
         return loop
 

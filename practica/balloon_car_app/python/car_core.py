@@ -61,14 +61,17 @@ class CarConfig:
     hsv_min_prob: float = 0.65      # prob. mínima del color ganador; si no → dudoso (dataset: 0.65 = 96 % ok, 1.5 % otro color)
 
     # --- Seguimiento del objetivo ---
-    smoothing: float = 0.6          # EMA del punto objetivo (1.0 = sin suavizar)
+    smoothing: float = 1.0          # EMA del punto (1.0 = sin suavizar: con YOLO lento y giros entre
+                                    # frames, mezclar con la posición de antes del giro sesga dx)
     hold_frames: int = 2            # frames válidos sin ver el objetivo antes de darlo por perdido
     confirm_frames: int = 1         # frames quietos viendo el objetivo para salir de SEARCH
     stale_stop: float = 2.0         # s sin percepción nueva en APPROACH → parar
 
     # --- Gira y mira (YOLO tarda ≈0.7–1.4 s) ---
-    look_settle: float = 0.15       # un frame vale si se tomó al menos esto después del último giro
+    look_settle: float = 0.35       # un frame vale si se tomó al menos esto después del último giro
+                                    # (cubre el retraso del buffer de la cámara)
     align_dx: float = 0.20          # |dx| mayor → giro corto en sitio y volver a mirar
+    turn_confirm: int = 2           # frames quietos seguidos con el globo al mismo lado antes de girar
     w_align: float = 45.0           # velocidad de ese giro
     turn_gain: float = 0.35         # s de giro por unidad de dx (calibrar con CAR_MODE=spin)
     turn_min: float = 0.06
@@ -244,6 +247,7 @@ class BalloonController:
         self.t_state = now
         self.confirm = 0
         self.aligned = 0
+        self.turn_seen, self.turn_side = 0, 0   # frames quietos con el globo descentrado a ese lado
         self.cmd = (0.0, 0.0)       # comando de APPROACH entre frames
         self.target = None
         if state in (SEARCH, WANDER):
@@ -418,6 +422,7 @@ class BalloonController:
                 self._enter(SEARCH, now)
             return
         if held:  # no se ve en este frame: parar y volver a mirar
+            self.turn_seen = self.turn_side = 0
             self.cmd = (0.0, 0.0)
             self.move_end = now
             self.note = "no se ve → parar y mirar"
@@ -431,13 +436,24 @@ class BalloonController:
         tag = c.target_color + (f" {prob:.2f}" if prob is not None else "")
         pos = f"dx={dx:+.2f} b={target['bottom']:.2f} w={target['width']:.2f}"
         self.last_near = near and abs(dx) < c.commit_dx
+        side = 1 if dx >= 0 else -1
         if abs(dx) > c.align_dx:
-            dur = float(np.clip(c.turn_gain * abs(dx), c.turn_min, c.turn_max))
-            self.cmd = (0.0, math.copysign(c.w_align, dx))
-            self.move_end = now + dur
             self.aligned = 0
+            # dar tiempo a YOLO: girar solo si varios frames quietos lo ven al mismo lado
+            self.turn_seen = self.turn_seen + 1 if self.turn_side == side else 1
+            self.turn_side = side
+            if self.turn_seen < c.turn_confirm:
+                self.cmd = (0.0, 0.0)  # quieto: el siguiente frame ya vale
+                self.note = f"{tag} {pos} → confirmar {self.turn_seen}/{c.turn_confirm}"
+                return
+            dur = float(np.clip(c.turn_gain * abs(dx), c.turn_min, c.turn_max))
+            self.cmd = (0.0, side * c.w_align)
+            self.move_end = now + dur
+            self.turn_seen = self.turn_side = 0
             self.note = f"{tag} {pos} → girar {dur:.2f} s"
-        elif near:
+            return
+        self.turn_seen = self.turn_side = 0
+        if near:
             self.cmd = (0.0, 0.0)
             self.move_end = now  # el siguiente frame tiene que tomarse ya quieto
             self.aligned = self.aligned + 1 if abs(dx) < c.commit_dx and not blockers else 0
@@ -471,8 +487,11 @@ class DriveSender:
 
 
 class PrintDrive:
+    def __init__(self, turn_sign=1):
+        self.turn_sign = turn_sign
+
     def drive(self, v, w):
-        print(f"→ MCU drive v={v:+4d} w={w:+4d}")
+        print(f"→ MCU drive v={v:+4d} w={w * self.turn_sign:+4d}")
 
     def raw_pct(self, left, right):
         print(f"→ MCU raw_pct L={left:+d} R={right:+d}")
@@ -488,14 +507,19 @@ class PrintDrive:
 
 
 class BridgeDrive:
-    """UNO Q: funciones del sketch vía Bridge RPC."""
+    """UNO Q: funciones del sketch vía Bridge RPC.
 
-    def __init__(self):
+    `turn_sign=-1` invierte el giro si el carro gira al lado contrario del pedido
+    (w > 0 debe girar a la DERECHA); así no hay que volver a cargar el sketch.
+    """
+
+    def __init__(self, turn_sign=1):
         from arduino.app_utils import Bridge
         self.bridge = Bridge
+        self.turn_sign = turn_sign
 
     def drive(self, v, w):
-        self.bridge.call("drive", int(v), int(w))
+        self.bridge.call("drive", int(v), int(w) * self.turn_sign)
 
     def raw_pct(self, left, right):
         self.bridge.call("raw_pct", int(left), int(right))

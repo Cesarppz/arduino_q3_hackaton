@@ -39,6 +39,10 @@ WAIT_BUTTON = False   # True = no arranca hasta pulsar el botón (D2 a GND)
 #   MIN_x : % a partir del cual la rueda empieza a girar
 MOTOR_CAL = {"GAIN_IZQ": 100, "GAIN_DER": 100, "MIN_IZQ": 20, "MIN_DER": 20}
 
+# Sentido del giro: w > 0 debe girar a la DERECHA. Este carro giraba al revés
+# (globo a la izquierda → giraba a la derecha), por eso -1. Poner 1 si cambia el cableado.
+TURN_SIGN = -1
+
 # Modo híbrido: YOLO detecta, VitTrack sigue al globo y YOLO lo re-verifica
 # cada VERIFY_EVERY_S segundos. False = YOLO en cada frame.
 # En la placa no funciona: su OpenCV 4.13 viene sin el módulo dnn que usa VitTrack.
@@ -59,7 +63,7 @@ try:
 except ImportError:
     ON_UNO_Q = False
 
-transport = BridgeDrive() if ON_UNO_Q else PrintDrive()
+transport = BridgeDrive(TURN_SIGN) if ON_UNO_Q else PrintDrive(TURN_SIGN)
 send_calibration(transport, MOTOR_CAL)
 sender = DriveSender(transport, heartbeat_s=0.1)
 

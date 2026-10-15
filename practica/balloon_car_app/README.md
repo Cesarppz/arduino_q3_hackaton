@@ -45,10 +45,10 @@ Para ajustar con fotos de la pista: súbelas al proyecto viejo de 3 colores (o e
 ## Control a 20 Hz + "gira y mira"
 YOLO por el brick tarda **0.65–1.4 s por frame**, y el sketch para los motores si pasan 300 ms sin comando.
 - La cámara y YOLO van en un hilo (`PerceptionThread` en `main.py`). El control corre cada `CONTROL_DT` (50 ms) y manda un comando al menos cada 100 ms. Entre frames se llama a `ctrl.step(None, …)`, y la embestida, el retroceso y los giros avanzan con el reloj.
-- **Solo deciden los frames tomados con el carro quieto**, es decir, al menos `look_settle` (0.15 s) después del último giro. Antes, el carro decidía con un frame tomado mientras giraba: cuando YOLO respondía, el globo ya no estaba donde decía la caja, el carro giraba de más y lo perdía.
+- **Solo deciden los frames tomados con el carro quieto**, es decir, al menos `look_settle` (0.35 s, para cubrir también el buffer de la cámara) después del último giro. Antes, el carro decidía con un frame tomado mientras giraba: cuando YOLO respondía, el globo ya no estaba donde decía la caja, el carro giraba de más y lo perdía.
 - **SEARCH:** gira un pulso (`search_on` a `w_search`), para y espera un frame quieto. Si ve el globo en un frame tomado mientras giraba, corta el pulso y lo confirma con un frame quieto.
 - **APPROACH**, con cada frame quieto:
-  - `|dx| > align_dx`: hace un giro **corto** en sitio, de `turn_gain·|dx|` s (entre 0.06 y 0.30 s) a `w_align`. Luego para y vuelve a mirar. Nunca encadena dos giros sin mirar.
+  - `|dx| > align_dx`: **primero da tiempo a YOLO**. Solo gira cuando `turn_confirm` (2) frames quietos seguidos ven el globo al mismo lado; mientras tanto se queda quieto (`→ confirmar 1/2`). Entonces hace un giro **corto** en sitio, de `turn_gain·|dx|` s (entre 0.06 y 0.30 s) a `w_align`. Luego para y vuelve a mirar. Nunca encadena dos giros sin mirar.
   - Centrado y lejos: avanza recto a `v_approach` con una corrección suave (`k_fine`).
   - Centrado y cerca: para. **Embiste solo tras `commit_confirm` (2) frames quietos seguidos** en los que el globo está centrado, cerca, es del color objetivo y no hay otro globo delante.
 - **COMMIT:** embiste recto a 100 durante 1.2 s, sin corregir, porque los frames llegan tarde.
@@ -58,12 +58,13 @@ YOLO por el brick tarda **0.65–1.4 s por frame**, y el sketch para los motores
 | Parámetro (`CarConfig`) | Valor | Para qué |
 |---|---|---|
 | `align_dx` / `w_align` / `turn_gain` | 0.20 / 45 / 0.35 s | giro corto para centrar el globo |
+| `turn_confirm` | 2 | frames quietos con el globo al mismo lado antes de girar |
 | `v_approach` / `k_fine` | 55 / 30 | avance con el globo centrado |
 | `near_bottom` / `near_width` / `commit_dx` | 0.50 / 0.38 / 0.15 | cuándo está cerca y centrado para embestir |
 | `commit_confirm` | 2 | frames quietos apuntado antes de embestir (≈1–1.5 s) |
 | `v_commit` / `t_commit` / `t_back` | 100 / 1.2 s / 0.5 s | embestida y retroceso |
 | `w_search` / `search_on` / `search_pulses` | 60 / 0.30 s / 16 | búsqueda |
-| `look_settle` / `stale_stop` | 0.15 s / 2 s | frame "quieto" / parar si no llega percepción |
+| `look_settle` / `stale_stop` | 0.35 s / 2 s | frame "quieto" / parar si no llega percepción |
 
 **Calibrar `turn_gain`** con `CAR_MODE=spin`: mide cuántos grados gira en 2 s a `w_align` (45). La cámara C270 tiene unos 60° de campo, así que `dx=1` equivale a unos 30°: `turn_gain ≈ 30 / (grados por segundo)`.
 - Si se pasa (el `dx` cambia de signo en el giro siguiente), baja `turn_gain`.
@@ -87,7 +88,7 @@ YOLO por el brick tarda **0.65–1.4 s por frame**, y el sketch para los motores
 
 ## Puesta en marcha
 1. Calibrar con las ruedas al aire: `CAR_MODE=min_sweep` → `MIN_IZQ / MIN_DER`. En el suelo: `CAR_MODE=straight` → `GAIN_*`. Copiar a `MOTOR_CAL` en `main.py`.
-2. Si el carro gira al revés de lo esperado (globo a la derecha → gira a la izquierda), revisar el sentido en `move.cpp` o cambiar el signo de `w` en `drive()` del sketch.
+2. **Sentido de giro:** `w > 0` debe girar a la derecha. Si gira al revés (globo a la izquierda y el carro gira a la derecha), cambia `TURN_SIGN` en `main.py`. Con este carro es **-1** (comprobado en pista). Se comprueba con `CAR_MODE=spin`.
 3. `TARGET_COLOR` en `main.py` → Run.
 4. Ajuste en pista (`CarConfig` en `car_core.py`): `turn_gain`, `v_approach`, `near_bottom`, `near_width`, `commit_confirm`, `t_commit`, `search_on`; color: `hsv_s_min`, `hsv_min_prob`.
 
